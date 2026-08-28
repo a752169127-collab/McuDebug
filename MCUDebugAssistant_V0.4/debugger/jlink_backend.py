@@ -144,6 +144,12 @@ class JLinkBackend:
         self._fn_rtt_read = None
         self._hss_active = False
         self._rtt_active = False
+        # V0.4.14: reuse one host HSS buffer.  The old path allocated/zeroed a
+        # 256 KiB ctypes array every 5 ms and then sliced it through Python.
+        # That is unnecessary allocator pressure in a long-running real-time
+        # capture and can amplify rare GIL/heap pauses.
+        self._hss_read_buffer = None
+        self._hss_read_buffer_size = 0
 
     @property
     def dll_path(self) -> Optional[str]:
@@ -532,7 +538,10 @@ class JLinkBackend:
         if self._fn_hss_read is None:
             raise JLinkError("This J-Link DLL does not expose JLINK_HSS_Read")
         size = max(1, int(max_bytes))
-        buffer = (ctypes.c_ubyte * size)()
+        if self._hss_read_buffer is None or self._hss_read_buffer_size < size:
+            self._hss_read_buffer = (ctypes.c_ubyte * size)()
+            self._hss_read_buffer_size = size
+        buffer = self._hss_read_buffer
         rc = int(self._fn_hss_read(ctypes.cast(buffer, ctypes.c_void_p), size))
         if rc < 0:
             raise JLinkError(f"JLINK_HSS_Read failed, rc={rc}")
@@ -540,7 +549,9 @@ class JLinkBackend:
             return b""
         if rc > size:
             raise JLinkError(f"JLINK_HSS_Read returned invalid size {rc} > {size}")
-        return bytes(buffer[:rc])
+        # string_at performs one direct native->bytes copy; ctypes array slicing
+        # can create a large temporary Python sequence first.
+        return ctypes.string_at(ctypes.addressof(buffer), rc)
 
     def hss_stop(self) -> None:
         if not self._hss_active:

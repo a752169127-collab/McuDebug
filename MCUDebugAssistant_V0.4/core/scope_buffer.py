@@ -93,6 +93,29 @@ class ScopeDataStore:
         self._extrema_cache = {}
         self._revision += 1
 
+    def reserve_capacity(self, required: int, channel_ids: Iterable[int] = ()) -> int:
+        """Preallocate a complete live-capture ring outside the hot path.
+
+        V0.4.14 still started at 4096 samples and doubled the ring in
+        ``append()``.  ``append_samples()`` runs in the GUI thread, so a capacity
+        boundary could allocate/copy X plus every channel while the 144 Hz
+        presentation loop was active.  Reserve the expected session footprint
+        before acquisition begins so steady-state append never reallocates.
+        """
+        target = min(self.max_points, max(1, int(required)))
+        self._ensure_capacity(target)
+        for raw_cid in channel_ids:
+            cid = int(raw_cid)
+            arr = self._values.get(cid)
+            if arr is None:
+                self._values[cid] = np.full(self._capacity, np.nan, dtype=np.float64)
+            elif arr.size != self._capacity:
+                replacement = np.full(self._capacity, np.nan, dtype=np.float64)
+                old = self._materialize_channel(cid)
+                replacement[: old.size] = old
+                self._values[cid] = replacement
+        return int(self._capacity)
+
     # ---------- Ring helpers ----------
     def _physical_index(self, logical_offset: int) -> int:
         return (self._start + int(logical_offset)) % self._capacity

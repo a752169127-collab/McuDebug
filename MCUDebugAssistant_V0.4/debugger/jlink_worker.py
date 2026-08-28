@@ -31,6 +31,7 @@ class JLinkWorker(QObject):
     # args: times(list[float]), values(dict[channel_id,list]), actual_hz, x_is_time
     scope_samples = Signal(object, object, float, bool)
     scope_error = Signal(str)
+    scope_perf = Signal(float, float, float, int, int)
     scope_state_changed = Signal(bool, str)
     # RTT-normal discovers its channels from JScope_<FORMAT>.
     # args: channel name, list[dict{id,name,type_name}], has_timestamp
@@ -85,6 +86,12 @@ class JLinkWorker(QObject):
         self._scope_actual_hz = 0.0
         self._scope_x_is_time = True
         self._scope_rtt_find_deadline = 0.0
+        self._scope_perf_last_emit_at = 0.0
+        self._scope_perf_max_poll_ms = 0.0
+        self._scope_perf_last_read_ms = 0.0
+        self._scope_perf_last_decode_ms = 0.0
+        self._scope_perf_last_frames = 0
+        self._scope_perf_last_bytes = 0
 
     # ---------- Connection ----------
     @Slot(object)
@@ -308,6 +315,12 @@ class JLinkWorker(QObject):
             self._scope_pending_times.clear()
             self._scope_pending_values.clear()
             self._scope_last_emit_at = 0.0
+            self._scope_perf_last_emit_at = 0.0
+            self._scope_perf_max_poll_ms = 0.0
+            self._scope_perf_last_read_ms = 0.0
+            self._scope_perf_last_decode_ms = 0.0
+            self._scope_perf_last_frames = 0
+            self._scope_perf_last_bytes = 0
             self._scope_rate_started_at = self._scope_started_at
             self._scope_rate_samples = 0
             self._scope_actual_hz = 0.0
@@ -364,6 +377,7 @@ class JLinkWorker(QObject):
 
     @Slot()
     def _poll_scope(self) -> None:
+        poll_started = time.perf_counter()
         try:
             if self._scope_source == "HSS":
                 self._poll_hss()
@@ -372,15 +386,32 @@ class JLinkWorker(QObject):
         except Exception as exc:
             self.scope_error.emit(str(exc))
             self._stop_scope_sampling_internal()
+        finally:
+            poll_ms = (time.perf_counter() - poll_started) * 1000.0
+            self._scope_perf_max_poll_ms = max(self._scope_perf_max_poll_ms, poll_ms)
+            now = time.perf_counter()
+            if poll_ms >= 40.0 or now - self._scope_perf_last_emit_at >= 1.0:
+                self._scope_perf_last_emit_at = now
+                self.scope_perf.emit(
+                    float(max(poll_ms, self._scope_perf_max_poll_ms)),
+                    float(self._scope_perf_last_read_ms),
+                    float(self._scope_perf_last_decode_ms),
+                    int(self._scope_perf_last_frames),
+                    int(self._scope_perf_last_bytes),
+                )
+                self._scope_perf_max_poll_ms = 0.0
 
     def _poll_hss(self) -> None:
         assert self._scope_hss_decoder is not None
+        read_started = time.perf_counter()
         raw = self._jlink.hss_read()
+        self._scope_perf_last_read_ms = (time.perf_counter() - read_started) * 1000.0
+        decode_started = time.perf_counter()
         times, rows = self._scope_hss_decoder.feed(raw)
+        self._scope_perf_last_decode_ms = (time.perf_counter() - decode_started) * 1000.0
+        self._scope_perf_last_frames = len(rows)
+        self._scope_perf_last_bytes = len(raw)
         if rows:
-            # Use the timestamp supplied by J-Link HSS itself. This keeps the X axis
-            # aligned with the actual acquisition instants instead of synthesizing
-            # time from the requested sample rate.
             self._scope_sample_index += len(rows)
             values: dict[int, list[float | int]] = {}
             for row in rows:

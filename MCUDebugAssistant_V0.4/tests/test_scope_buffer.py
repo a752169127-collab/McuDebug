@@ -116,3 +116,18 @@ def test_visible_window_curve_excludes_historical_outlier_for_lane_fit():
     assert np.min(y2) > 39.0
     assert abs(float(np.min(y1)) - float(np.min(y2))) < 1e-12
     assert abs(float(np.max(y1)) - float(np.max(y2))) < 1e-12
+
+
+def test_reserve_capacity_preallocates_channels_and_avoids_growth():
+    store = ScopeDataStore(seconds=30.0, max_points=100_000)
+    reserved = store.reserve_capacity(33_500, [1, 2, 3])
+    assert reserved >= 33_500
+    assert {1, 2, 3}.issubset(store.channel_ids)
+    before = store.capacity
+
+    # A representative live stream comfortably inside the reservation must not
+    # trigger another capacity growth.
+    x = np.arange(0, 20_000, dtype=np.float64) / 1000.0
+    store.append(x, {1: x, 2: x * 2, 3: -x}, True)
+    assert store.capacity == before
+    assert store.sample_count == 20_000

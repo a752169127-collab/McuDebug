@@ -40,6 +40,7 @@ from core.render_cache import ScopeRenderCache
 from core.presentation_pacer import PresentationPacer
 from core.follow_clock import FollowPresentationClock
 from core.latency_guard import LiveLatencyGuard
+from core.gui_watchdog import GuiHeartbeatWatchdog
 from core.lane_mapper import (
     lane_axis_ticks,
     lane_bounds,
@@ -618,9 +619,22 @@ class ScopeGraphicsView(pg.GraphicsLayoutWidget):
         self._paint_fps = 0.0
         self._last_paint_at: float | None = None
         self._paint_intervals = deque(maxlen=240)
+        # V0.4.14: measure the actual QGraphicsView/QPainter work.  Previous
+        # stall logs only profiled presentation-tick Python code; a long
+        # super().paintEvent() therefore looked like an unexplained event-loop
+        # pause even though it can itself block the GUI thread.
+        self._last_paint_work_ms = 0.0
+        self._max_paint_work_ms = 0.0
+        self._slow_paint_count = 0
 
     def paintEvent(self, event) -> None:  # noqa: N802
+        paint_started = time.perf_counter()
         super().paintEvent(event)
+        paint_work_ms = (time.perf_counter() - paint_started) * 1000.0
+        self._last_paint_work_ms = float(paint_work_ms)
+        self._max_paint_work_ms = max(self._max_paint_work_ms, float(paint_work_ms))
+        if paint_work_ms >= 40.0:
+            self._slow_paint_count += 1
         self._paint_frames += 1
         now = time.perf_counter()
         if self._last_paint_at is not None:
@@ -640,9 +654,21 @@ class ScopeGraphicsView(pg.GraphicsLayoutWidget):
         self._paint_fps = 0.0
         self._last_paint_at = None
         self._paint_intervals.clear()
+        self._last_paint_work_ms = 0.0
+        self._max_paint_work_ms = 0.0
+        self._slow_paint_count = 0
 
     def measured_paint_fps(self) -> float:
         return float(self._paint_fps)
+
+    def measured_last_paint_work_ms(self) -> float:
+        return float(self._last_paint_work_ms)
+
+    def measured_max_paint_work_ms(self) -> float:
+        return float(self._max_paint_work_ms)
+
+    def measured_slow_paint_count(self) -> int:
+        return int(self._slow_paint_count)
 
     def measured_paint_jitter_ms(self) -> float:
         if len(self._paint_intervals) < 3:
@@ -883,10 +909,17 @@ class ScopePage(QWidget):
         self._latest_data_arrival_at = 0.0
         self._latest_data_x: float | None = None
         self._follow_clock = FollowPresentationClock()
-        # V0.4.12 live-latency guard: keep Windows timer/power scheduling stable
+        # V0.4.14 live-latency guard: keep Windows timer/power scheduling stable
         # even when this window loses foreground focus, and defer cyclic GC out
         # of the high-refresh acquisition interval.
         self._latency_guard = LiveLatencyGuard()
+        # V0.4.16: out-of-band GUI heartbeat sampler.  All profiled Scope stages
+        # are now sub-10ms on the real target, yet 200-700ms tick gaps remain.
+        # The watchdog samples the main Python stack during the gap instead of
+        # guessing which unprofiled/native callback is responsible.
+        self._gui_watchdog = GuiHeartbeatWatchdog(threshold_ms=120.0, poll_ms=20.0, max_samples_per_episode=4)
+        self._last_watchdog_class = "-"
+        self._last_watchdog_stale_ms = 0.0
         self._render_frames = 0
         self._render_rate_started_at = time.perf_counter()
         self._presentation_tick_count = 0
@@ -896,6 +929,38 @@ class ScopePage(QWidget):
         self._stall_count = 0
         self._max_stall_ms = 0.0
         self._last_stall_log_at = 0.0
+        # V0.4.14 Transform Follow: high-rate live scrolling translates the
+        # already-rendered curve items instead of calling ViewBox.setXRange() on
+        # every presentation tick. The expensive ViewBox/Axis/Grid range commit
+        # is performed only a few times per second.
+        self._transform_follow_active = False
+        self._transform_follow_base_right: float | None = None
+        self._transform_follow_dx = 0.0
+        self._transform_follow_last_commit_at = 0.0
+        self._transform_follow_commit_hz = 6.0
+        # Lightweight stage profiler used when a GUI stall is detected.
+        self._last_tick_work_ms = 0.0
+        self._last_render_work_ms = 0.0
+        self._last_follow_work_ms = 0.0
+        self._last_setdata_work_ms = 0.0
+        self._last_table_work_ms = 0.0
+        # Worker-side HSS profile is updated by MainWindow via set_worker_perf().
+        # Keeping it here lets a GUI-stall log distinguish QPainter stalls from
+        # J-Link/native-read or Python HSS decode/GIL spikes.
+        self._worker_poll_ms = 0.0
+        self._worker_read_ms = 0.0
+        self._worker_decode_ms = 0.0
+        self._worker_frames = 0
+        self._worker_bytes = 0
+        # V0.4.15 profiles the remaining recurrent GUI callback that was not
+        # covered by the presentation profiler: worker signal -> append_samples
+        # -> ScopeDataStore.append().  Ring capacity changes are tracked because
+        # a live reallocation/copy here blocks the GUI event loop outside
+        # _viewport_tick(), exactly matching the unexplained stall signature.
+        self._last_append_work_ms = 0.0
+        self._max_append_work_ms = 0.0
+        self._live_ring_resize_count = 0
+        self._session_reserved_capacity = int(self._data.capacity)
 
         # Scope acquisition and rendering are intentionally decoupled. Raw samples
         # are appended whenever the worker emits a chunk (up to 60 Hz), while
@@ -949,7 +1014,7 @@ class ScopePage(QWidget):
         # Transparent/None background combined with manual viewport updates could
         # expose the parent widget background and make lanes appear washed out.
         self.canvas.setBackground("k")
-        # V0.4.12: CPU raster is the only supported renderer. Real-board A/B
+        # V0.4.14: CPU raster is the only supported renderer. Real-board A/B
         # testing showed QOpenGLWidget slower for this QGraphicsScene workload,
         # so the experimental GPU path was removed rather than kept as dead UI.
         self.plot_host = self.canvas  # compatibility alias used by overlay widgets
@@ -1059,7 +1124,7 @@ class ScopePage(QWidget):
         self.fps_combo.setEditable(True)
         self.fps_combo.addItems(["15", "30", "45", "60", "75", "90", "100", "120", "144"])
         self.fps_combo.setCurrentText("60")
-        self.fps_combo.setToolTip("Viewport 目标刷新率 1~144 FPS；V0.4.12 使用绝对Deadline稳帧 + Windows低延迟调度 + 实时区间GC隔离，不改变 HSS/RTT 原始采样")
+        self.fps_combo.setToolTip("Viewport 目标刷新率 1~144 FPS；V0.4.16 使用GUI Watchdog + 预分配Ring Buffer + Transform Follow + Stall归因 + 绝对Deadline稳帧，不改变 HSS/RTT 原始采样")
         if self.fps_combo.lineEdit() is not None:
             self.fps_combo.lineEdit().setValidator(QIntValidator(1, self.VIEWPORT_FPS_MAX, self.fps_combo))
             self.fps_combo.lineEdit().editingFinished.connect(self._fps_changed)
@@ -1121,6 +1186,7 @@ class ScopePage(QWidget):
                 self.actual_label.setText(f"Actual: {self._latest_actual_hz:.4g} Hz")
             status = self._latency_guard.activate()
             self._reset_presentation_diagnostics()
+            self._gui_watchdog.start()
             self.log_requested.emit(f"Scope live latency mode: {status.short_text()}")
             # Start begins a fresh acquisition session; _start() has already
             # cleared the previous buffer. The first arriving samples perform
@@ -1129,6 +1195,7 @@ class ScopePage(QWidget):
             # Pause is an analysis operation: stop acquisition and preserve the
             # exact current X/Y window. Flush only the newest pending display
             # state; never call View All / fit here.
+            self._gui_watchdog.stop()
             self._latency_guard.deactivate()
             QTimer.singleShot(300, self._collect_idle_gc)
             if self._render_dirty:
@@ -1143,10 +1210,28 @@ class ScopePage(QWidget):
         self._stall_count = 0
         self._max_stall_ms = 0.0
         self._last_stall_log_at = 0.0
+        self._last_watchdog_class = "-"
+        self._last_watchdog_stale_ms = 0.0
+        self._last_tick_work_ms = 0.0
+        self._last_render_work_ms = 0.0
+        self._last_follow_work_ms = 0.0
+        self._last_setdata_work_ms = 0.0
+        self._last_table_work_ms = 0.0
+        self._last_append_work_ms = 0.0
+        self._max_append_work_ms = 0.0
+        self._live_ring_resize_count = 0
         try:
             self.canvas.reset_paint_metrics()
         except Exception:
             pass
+
+    def set_worker_perf(self, poll_ms: float, read_ms: float, decode_ms: float, frames: int, byte_count: int) -> None:
+        """Receive low-rate acquisition-thread timing diagnostics."""
+        self._worker_poll_ms = float(poll_ms)
+        self._worker_read_ms = float(read_ms)
+        self._worker_decode_ms = float(decode_ms)
+        self._worker_frames = int(frames)
+        self._worker_bytes = int(byte_count)
 
     def _collect_idle_gc(self) -> None:
         # Never collect inside a restarted live session.  The scheduled idle
@@ -1162,6 +1247,9 @@ class ScopePage(QWidget):
         self.stop_btn.setEnabled(self._connected and self._sampling)
         self.source_combo.setEnabled(not self._sampling)
         self.sample_hz_spin.setEnabled(not self._sampling and self._source == "HSS")
+        # Buffer size defines the preallocated live-session ring. Keep it fixed
+        # during acquisition so no resize can be forced into the GUI hot path.
+        self.buffer_seconds_spin.setEnabled(not self._sampling)
         self.add_btn.setEnabled(not self._sampling and self._source == "HSS")
         self.remove_btn.setEnabled(not self._sampling and self._source == "HSS")
         self.channel_table.set_definition_editable(not self._sampling)
@@ -1258,9 +1346,41 @@ class ScopePage(QWidget):
         # geometry submissions rather than running into the cache tail.
         return min(0.120, max(0.055, 1.35 / max(1.0, self._curve_refresh_hz())))
 
+    def _consume_gui_watchdog_captures(self) -> None:
+        captures = self._gui_watchdog.pop_captures()
+        if not captures:
+            return
+        latest = captures[-1]
+        self._last_watchdog_class = latest.classification
+        self._last_watchdog_stale_ms = max(c.stale_ms for c in captures)
+        # Emit a compact episode summary plus bounded stack samples.  Logging is
+        # performed only after the GUI has resumed, never from the watchdog thread.
+        classes: dict[str, int] = {}
+        for c in captures:
+            classes[c.classification] = classes.get(c.classification, 0) + 1
+        class_text = ",".join(f"{k}:{v}" for k, v in sorted(classes.items()))
+        self.log_requested.emit(
+            f"Scope watchdog: {len(captures)} sample(s) | staleMax={self._last_watchdog_stale_ms:.1f}ms "
+            f"| class={class_text} | watchdogGapMax={self._gui_watchdog.max_poll_gap_ms():.1f}ms"
+        )
+        for index, cap in enumerate(captures, 1):
+            stack_tail = " <- ".join(cap.gui_stack[-6:]) if cap.gui_stack else "<no Python GUI frame>"
+            self.log_requested.emit(
+                f"Scope watchdog[{index}]: stale={cap.stale_ms:.1f}ms class={cap.classification} "
+                f"pollGap={cap.watchdog_poll_gap_ms:.1f}ms | GUI {stack_tail}"
+            )
+            if index == 1 and cap.other_thread_tops:
+                self.log_requested.emit("Scope watchdog threads: " + " | ".join(cap.other_thread_tops))
+
     def _viewport_tick(self) -> None:
         """One deadline-paced presentation tick for camera + deferred GUI work."""
-        tick_now = time.perf_counter()
+        tick_started = time.perf_counter()
+        tick_now = tick_started
+        # Consume any stack samples captured while this GUI thread was stalled,
+        # then publish a fresh heartbeat for the next interval.
+        self._consume_gui_watchdog_captures()
+        if self._sampling:
+            self._gui_watchdog.beat(tick_now)
         if self._last_presentation_tick_at is not None:
             dt = tick_now - self._last_presentation_tick_at
             # Count only genuine event-loop stalls, not ordinary one-frame jitter.
@@ -1274,7 +1394,23 @@ class ScopePage(QWidget):
                     self.log_requested.emit(
                         f"Scope GUI stall: {stall_ms:.1f} ms | "
                         f"tick={self._presentation_tick_fps:.0f}/{self._fps_value()} fps | "
-                        f"pts={int(getattr(self, '_last_geometry_points', 0))}"
+                        f"pts={int(getattr(self, '_last_geometry_points', 0))} | "
+                        f"prevWork={self._last_tick_work_ms:.1f}ms "
+                        f"render={self._last_render_work_ms:.1f}ms "
+                        f"follow={self._last_follow_work_ms:.1f}ms "
+                        f"setData={self._last_setdata_work_ms:.1f}ms "
+                        f"table={self._last_table_work_ms:.1f}ms "
+                        f"append={self._last_append_work_ms:.1f}/{self._max_append_work_ms:.1f}ms "
+                        f"cap={self._data.capacity} resize={self._live_ring_resize_count} | "
+                        f"paint={self.canvas.measured_last_paint_work_ms():.1f}ms "
+                        f"paintMax={self.canvas.measured_max_paint_work_ms():.1f}ms "
+                        f"slowPaint={self.canvas.measured_slow_paint_count()} | "
+                        f"worker={self._worker_poll_ms:.1f}ms "
+                        f"read={self._worker_read_ms:.1f}ms "
+                        f"decode={self._worker_decode_ms:.1f}ms "
+                        f"frames={self._worker_frames} bytes={self._worker_bytes} | "
+                        f"wd={self._last_watchdog_class}/{self._last_watchdog_stale_ms:.0f}ms "
+                        f"wdGap={self._gui_watchdog.max_poll_gap_ms():.0f}ms"
                     )
         self._last_presentation_tick_at = tick_now
         self._presentation_tick_count += 1
@@ -1298,7 +1434,9 @@ class ScopePage(QWidget):
                 and self.follow_latest_check.isChecked()
                 and self._data.has_data
             ):
+                follow_started = time.perf_counter()
                 moved = self._follow_latest(force=False, smooth=True)
+                self._last_follow_work_ms = (time.perf_counter() - follow_started) * 1000.0
                 if moved:
                     self._render_frames += 1
 
@@ -1317,7 +1455,12 @@ class ScopePage(QWidget):
                 self.view_fps_label.setText(
                     f"P:{measured:.0f}/{self._fps_value()} T:{self._presentation_tick_fps:.0f}"
                     f"{low_text} J:{jitter:.1f}ms "
-                    f"Stall:{self._stall_count}/{self._max_stall_ms:.0f}ms{pts_text} {focus_text}"
+                    f"Stall:{self._stall_count}/{self._max_stall_ms:.0f}ms{pts_text} "
+                    f"W:{self._last_tick_work_ms:.1f} F:{self._last_follow_work_ms:.1f} "
+                    f"Paint:{self.canvas.measured_last_paint_work_ms():.1f}/{self.canvas.measured_max_paint_work_ms():.0f}ms "
+                    f"A:{self._last_append_work_ms:.1f}/{self._max_append_work_ms:.0f}ms "
+                    f"Cap:{self._data.capacity} R:{self._live_ring_resize_count} "
+                    f"WD:{self._last_watchdog_class}/{self._last_watchdog_stale_ms:.0f} {focus_text}"
                 )
                 self._last_view_fps_label_at = now
 
@@ -1328,11 +1471,13 @@ class ScopePage(QWidget):
                 self._present_requested = False
                 self.canvas.viewport().update()
         finally:
+            self._last_tick_work_ms = (time.perf_counter() - tick_started) * 1000.0
             # Single-shot absolute-deadline pacing: never overschedule 144 Hz as
             # a fixed 6 ms / 166.7 Hz timer and never issue catch-up bursts.
             self._schedule_next_viewport_tick(reset=False)
 
     def _render_if_dirty(self) -> None:
+        render_started = time.perf_counter()
         if self._rebuilding_plots:
             return
 
@@ -1352,10 +1497,13 @@ class ScopePage(QWidget):
         if self._user_dragging:
             self._flush_pending_manual_x_sync(force=False)
             self._render_frames += 1
+            self._last_render_work_ms = (time.perf_counter() - render_started) * 1000.0
             return
 
         if data_dirty and now - self._last_stats_refresh_at >= 1.0 / self._stats_refresh_hz():
+            table_started = time.perf_counter()
             self.channel_table.update_statistics(self._data.stats_snapshot())
+            self._last_table_work_ms = (time.perf_counter() - table_started) * 1000.0
             self._last_stats_refresh_at = now
             if self._latest_actual_hz > 0:
                 suffix = "" if self._sampling else " (paused)"
@@ -1390,6 +1538,7 @@ class ScopePage(QWidget):
             self._last_rendered_data_last_x = self._data.last_x
             self._present_requested = True
         self._render_frames += 1
+        self._last_render_work_ms = (time.perf_counter() - render_started) * 1000.0
 
     def _new_data_affects_visible_window(self) -> bool:
         """Whether appended/trimmed raw data can change the fixed visible X slice.
@@ -1485,9 +1634,21 @@ class ScopePage(QWidget):
             # used to retain/analyse the current capture; pressing Start again
             # intentionally clears the old raw buffer and statistics first.
             self._clear_buffered_data(log_message=False)
+            # Preallocate the complete retained session before J-Link starts.
+            # Use requested Hz rather than current Actual Hz so the reservation
+            # remains safe if HSS throughput improves during the same capture.
+            requested_hz = max(1, int(self.sample_hz_spin.value()))
+            seconds = max(1, int(self.buffer_seconds_spin.value()))
+            reserve_points = int(math.ceil(requested_hz * seconds * 1.10)) + max(256, requested_hz // 2)
+            channel_ids = self.channel_table.ordered_channel_ids()
+            self._session_reserved_capacity = self._data.reserve_capacity(reserve_points, channel_ids)
             self._need_fit = True
-            self.start_requested.emit(self._source, specs, self.sample_hz_spin.value())
-            self.log_requested.emit("Scope: new acquisition session; previous buffered data cleared")
+            self.start_requested.emit(self._source, specs, requested_hz)
+            self.log_requested.emit(
+                f"Scope: new acquisition session; previous buffered data cleared | "
+                f"ring preallocated={self._session_reserved_capacity} samples "
+                f"for {seconds}s @ requested {requested_hz}Hz"
+            )
         except Exception as exc:
             self.log_requested.emit(f"SCOPE START ERROR: {exc}")
 
@@ -1530,8 +1691,20 @@ class ScopePage(QWidget):
         )
 
     def append_samples(self, times, values, actual_hz: float, x_is_time: bool) -> None:
+        append_started = time.perf_counter()
+        capacity_before = int(self._data.capacity)
         self._x_is_time = bool(x_is_time)
         self._data.append(times, values, x_is_time)
+        capacity_after = int(self._data.capacity)
+        append_ms = (time.perf_counter() - append_started) * 1000.0
+        self._last_append_work_ms = append_ms
+        self._max_append_work_ms = max(self._max_append_work_ms, append_ms)
+        if self._sampling and capacity_after != capacity_before:
+            self._live_ring_resize_count += 1
+            self.log_requested.emit(
+                f"Scope WARNING: live ring resize {capacity_before}->{capacity_after} "
+                f"during append ({append_ms:.1f} ms); increase preallocation margin"
+            )
         self._latest_data_arrival_at = time.perf_counter()
         self._latest_data_x = self._data.last_x
         if self._x_is_time and self._latest_data_x is not None:
@@ -1545,6 +1718,7 @@ class ScopePage(QWidget):
         self._curve_data_pending = True
 
     def _view_changed(self, _view: str) -> None:
+        self._reset_transform_follow(keep_visual=True)
         # Rebuild the presentation graph once, then align the retained capture just
         # like an explicit View All.  This makes Overlay <-> Stacked deterministic
         # and prevents a previous mode's zoom from leaking into the new layout.
@@ -1852,6 +2026,7 @@ class ScopePage(QWidget):
         if not hasattr(self, "canvas") or self._rebuilding_plots:
             return
 
+        self._reset_transform_follow(keep_visual=True)
         previous_x_range = self._current_visible_x_range() if self._plots else None
         self._rebuilding_plots = True
         self.canvas.setUpdatesEnabled(False)
@@ -2153,7 +2328,7 @@ class ScopePage(QWidget):
             if not vb.sceneBoundingRect().contains(scene_pos):
                 return
             point = vb.mapSceneToView(scene_pos)
-            x_value = float(point.x())
+            x_value = self._view_x_to_data_x(float(point.x()))
             local_host = self.canvas.mapFromScene(scene_pos)
         except Exception:
             return
@@ -2194,7 +2369,7 @@ class ScopePage(QWidget):
                 self._hide_hover()
                 return
             point = vb.mapSceneToView(scene_pos)
-            x_value = float(point.x())
+            x_value = self._view_x_to_data_x(float(point.x()))
             local_host = self.canvas.mapFromScene(scene_pos)
         except Exception:
             self._hide_hover()
@@ -2235,6 +2410,7 @@ class ScopePage(QWidget):
             self.hover_label.hide()
 
     def _clear_buffered_data(self, log_message: bool = True) -> None:
+        self._reset_transform_follow(keep_visual=False)
         self._data.clear()
         self._follow_clock.reset()
         self._last_follow_right = None
@@ -2301,13 +2477,7 @@ class ScopePage(QWidget):
             density = 1.60
         return max(640, min(8000, int(width * density)))
 
-    def _current_visible_x_range(self) -> tuple[float, float] | None:
-        """Return the X window currently visible to the user.
-
-        Rendering only this window is a major performance rule. A 30 s raw
-        buffer must not force every 0.5 s zoomed view to rebuild/decimate all
-        30 s worth of samples on every frame.
-        """
+    def _viewbox_x_range(self) -> tuple[float, float] | None:
         if not self._plots:
             return None
         try:
@@ -2318,6 +2488,75 @@ class ScopePage(QWidget):
                 return low, high
         except Exception:
             pass
+        return None
+
+    def _effective_follow_shift(self) -> float:
+        return float(self._transform_follow_dx) if self._transform_follow_active else 0.0
+
+    def _view_x_to_data_x(self, x_value: float) -> float:
+        return float(x_value) + self._effective_follow_shift()
+
+    def _data_x_to_view_x(self, x_value: float) -> float:
+        return float(x_value) - self._effective_follow_shift()
+
+    def _apply_transform_follow_shift(self, dx: float) -> None:
+        self._transform_follow_dx = max(0.0, float(dx))
+        shift = -self._transform_follow_dx
+        for curve in self._curves.values():
+            try:
+                curve.setPos(shift, 0.0)
+            except Exception:
+                pass
+        for name in ("X1", "X2"):
+            value = self._cursor_values.get(name)
+            if value is None:
+                continue
+            view_value = self._data_x_to_view_x(float(value))
+            for line in self._x_lines.get(name, []):
+                try:
+                    line.setValue(view_value)
+                except Exception:
+                    pass
+
+    def _reset_transform_follow(self, *, keep_visual: bool = False) -> None:
+        if not self._transform_follow_active and abs(self._transform_follow_dx) <= 1e-15:
+            return
+        dx = float(self._transform_follow_dx)
+        if keep_visual and abs(dx) > 1e-15:
+            vb_range = self._viewbox_x_range()
+            if vb_range is not None:
+                self._transform_follow_active = False
+                self._transform_follow_dx = 0.0
+                self._set_shared_x_range(vb_range[0] + dx, vb_range[1] + dx)
+        self._transform_follow_active = False
+        self._transform_follow_base_right = None
+        self._transform_follow_dx = 0.0
+        self._transform_follow_last_commit_at = 0.0
+        for curve in self._curves.values():
+            try:
+                curve.setPos(0.0, 0.0)
+            except Exception:
+                pass
+        for name in ("X1", "X2"):
+            value = self._cursor_values.get(name)
+            if value is not None:
+                for line in self._x_lines.get(name, []):
+                    try:
+                        line.setValue(float(value))
+                    except Exception:
+                        pass
+
+    def _current_visible_x_range(self) -> tuple[float, float] | None:
+        """Return the effective X window visible to the user.
+
+        In Transform Follow the ViewBox itself is committed only a few times per
+        second, while curves translate every presentation tick.  Data/cache logic
+        therefore needs the committed range plus the transient transform shift.
+        """
+        base = self._viewbox_x_range()
+        if base is not None:
+            shift = self._effective_follow_shift()
+            return float(base[0] + shift), float(base[1] + shift)
         return self._full_buffer_x_range()
 
     def _render_cache_needs_build(self, visible_x: tuple[float, float] | None) -> bool:
@@ -2379,6 +2618,7 @@ class ScopePage(QWidget):
         # ViewBox.update(), PlotItem.update() and scene.update() fan-out here:
         # those were added while chasing the follower-lane symptom but did not
         # solve it and can perturb QGraphicsScene cache/invalidation ordering.
+        started = time.perf_counter()
         self.canvas.setUpdatesEnabled(False)
         geometry_points = 0
         try:
@@ -2396,6 +2636,9 @@ class ScopePage(QWidget):
         finally:
             self.canvas.setUpdatesEnabled(True)
         self._last_geometry_points = int(geometry_points)
+        self._last_setdata_work_ms = (time.perf_counter() - started) * 1000.0
+        if self._transform_follow_active:
+            self._apply_transform_follow_shift(self._transform_follow_dx)
         self._present_requested = True
 
     def _update_curves(self, skip_follow: bool = False) -> None:
@@ -2442,7 +2685,9 @@ class ScopePage(QWidget):
 
         now = time.perf_counter()
         if now - self._last_stats_refresh_at >= 1.0 / self._stats_refresh_hz():
+            table_started = time.perf_counter()
             self.channel_table.update_statistics(self._data.stats_snapshot())
+            self._last_table_work_ms = (time.perf_counter() - table_started) * 1000.0
             self._last_stats_refresh_at = now
 
         if follow_moved:
@@ -2468,6 +2713,8 @@ class ScopePage(QWidget):
         """
         if not self._plots or not (math.isfinite(low) and math.isfinite(high)) or high <= low:
             return
+        if self._transform_follow_active:
+            self._reset_transform_follow(keep_visual=False)
         target = self._plots[0]
         if self.view_combo.currentText() == "Stacked" and self._stacked_master is not None:
             target = self._stacked_master
@@ -2540,6 +2787,7 @@ class ScopePage(QWidget):
         self._last_curve_refresh_at = time.perf_counter()
 
     def _manual_plot_drag_started(self) -> None:
+        self._reset_transform_follow(keep_visual=True)
         # Disable Follow first, then freeze a lightweight full-history snapshot.
         # After this one preparation step the drag path does no curve setData(),
         # no table updates and no hover lookup; pyqtgraph only moves ViewBoxes.
@@ -2620,6 +2868,8 @@ class ScopePage(QWidget):
     def _follow_latest_toggled(self, checked: bool) -> None:
         # Single source of truth for live scrolling. Enabling it captures the
         # current user-visible X width; it does not fit/reset X or Y.
+        if not checked:
+            self._reset_transform_follow(keep_visual=True)
         self._last_follow_right = None
         self._last_follow_span = None
         self._last_follow_scroll_at = 0.0
@@ -2698,7 +2948,34 @@ class ScopePage(QWidget):
 
         self._applying_follow_range = True
         try:
-            self._set_shared_x_range(left, right)
+            # V0.4.14 Transform Follow: the expensive ViewBox range/Axis/Grid
+            # commit runs only a few times per second. Between commits the already
+            # rendered waveform items are translated, which is substantially
+            # cheaper and gives high-refresh motion without 144 setXRange calls/s.
+            commit_period = 1.0 / max(1.0, float(self._transform_follow_commit_hz))
+            need_commit = (
+                force
+                or not self._transform_follow_active
+                or self._transform_follow_base_right is None
+                or now - self._transform_follow_last_commit_at >= commit_period
+                or span_changed
+            )
+            if need_commit:
+                self._transform_follow_active = False
+                self._transform_follow_dx = 0.0
+                for curve in self._curves.values():
+                    try:
+                        curve.setPos(0.0, 0.0)
+                    except Exception:
+                        pass
+                self._set_shared_x_range(left, right)
+                self._transform_follow_active = True
+                self._transform_follow_base_right = right
+                self._transform_follow_last_commit_at = now
+                self._apply_transform_follow_shift(0.0)
+            else:
+                dx = max(0.0, right - float(self._transform_follow_base_right))
+                self._apply_transform_follow_shift(dx)
             self._last_follow_right = right
             self._last_follow_span = span
             self._last_follow_scroll_at = now
@@ -2857,6 +3134,7 @@ class ScopePage(QWidget):
         if channel_id is not None:
             self.channel_table.select_channel_id(channel_id)
         pos = plot.getPlotItem().vb.mapSceneToView(event.scenePos())
+        x_value = self._view_x_to_data_x(float(pos.x()))
         y_value = float(pos.y())
         if self._stacked_lane_mode:
             target_cid = channel_id if channel_id is not None else self.channel_table.selected_channel_id()
@@ -2864,8 +3142,8 @@ class ScopePage(QWidget):
                 y_value = self._unmap_stacked_single_y(int(target_cid), float(pos.y()))
         menu = QMenu(self)
         actions = {
-            menu.addAction("设置 X1"): lambda: self.set_cursor("X1", float(pos.x())),
-            menu.addAction("设置 X2"): lambda: self.set_cursor("X2", float(pos.x())),
+            menu.addAction("设置 X1"): lambda: self.set_cursor("X1", x_value),
+            menu.addAction("设置 X2"): lambda: self.set_cursor("X2", x_value),
             menu.addAction("设置 Y1"): lambda: self.set_cursor("Y1", y_value),
             menu.addAction("设置 Y2"): lambda: self.set_cursor("Y2", y_value),
         }
@@ -2910,7 +3188,7 @@ class ScopePage(QWidget):
     def _create_x_lines(self, name: str, value: float) -> None:
         lines = []
         for plot in self._plots:
-            line = pg.InfiniteLine(pos=value, angle=90, movable=True, label=name, labelOpts={"position": 0.92})
+            line = pg.InfiniteLine(pos=self._data_x_to_view_x(value), angle=90, movable=True, label=name, labelOpts={"position": 0.92})
             line.sigPositionChanged.connect(lambda ln, k=name: self._x_line_moved(k, ln))
             plot.addItem(line)
             lines.append(line)
@@ -2955,11 +3233,12 @@ class ScopePage(QWidget):
             return
         self._syncing_cursor = True
         try:
-            value = float(line.value())
+            view_value = float(line.value())
+            value = self._view_x_to_data_x(view_value)
             self._cursor_values[name] = value
             for other in self._x_lines[name]:
                 if other is not line:
-                    other.setValue(value)
+                    other.setValue(view_value)
         finally:
             self._syncing_cursor = False
         self._update_cursor_label()

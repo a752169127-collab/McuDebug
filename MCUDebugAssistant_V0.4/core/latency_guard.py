@@ -18,6 +18,7 @@ from dataclasses import dataclass
 import ctypes
 import gc
 import os
+import sys
 from ctypes import wintypes
 
 
@@ -29,6 +30,7 @@ class LatencyGuardStatus:
     process_above_normal: bool = False
     gui_thread_above_normal: bool = False
     cyclic_gc_disabled: bool = False
+    gil_switch_1ms: bool = False
 
     def short_text(self) -> str:
         if not self.active:
@@ -44,6 +46,8 @@ class LatencyGuardStatus:
             flags.append("T+")
         if self.cyclic_gc_disabled:
             flags.append("GCoff")
+        if self.gil_switch_1ms:
+            flags.append("GIL1ms")
         return "latency=" + ("/".join(flags) if flags else "on")
 
 
@@ -76,6 +80,7 @@ class LiveLatencyGuard:
         self._old_process_priority: int | None = None
         self._old_thread_priority: int | None = None
         self._power_throttling_changed = False
+        self._old_switch_interval: float | None = None
         self._status = LatencyGuardStatus(False)
 
     @property
@@ -99,6 +104,14 @@ class LiveLatencyGuard:
             except Exception:
                 pass
 
+        gil_ok = False
+        try:
+            self._old_switch_interval = float(sys.getswitchinterval())
+            sys.setswitchinterval(0.001)
+            gil_ok = True
+        except Exception:
+            self._old_switch_interval = None
+
         timer_ok = power_ok = process_ok = thread_ok = False
         if os.name == "nt":
             timer_ok = self._activate_windows_timer()
@@ -114,6 +127,7 @@ class LiveLatencyGuard:
             process_above_normal=process_ok,
             gui_thread_above_normal=thread_ok,
             cyclic_gc_disabled=not gc.isenabled(),
+            gil_switch_1ms=gil_ok,
         )
         return self._status
 
@@ -130,6 +144,13 @@ class LiveLatencyGuard:
             # owner policy" query on all supported Windows builds.  Leaving this
             # debug tool opted out prevents focus/background transitions from
             # silently changing its timing behavior after the first capture.
+
+        if self._old_switch_interval is not None:
+            try:
+                sys.setswitchinterval(float(self._old_switch_interval))
+            except Exception:
+                pass
+            self._old_switch_interval = None
 
         if self._gc_was_enabled:
             try:

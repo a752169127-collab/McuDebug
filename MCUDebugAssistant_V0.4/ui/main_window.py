@@ -59,7 +59,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("MCU Debug Assistant V0.4.12 - Long-Run Latency Guard")
+        self.setWindowTitle("MCU Debug Assistant V0.4.16 - GUI Stall Watchdog")
         self.resize(1220, 820)
         # Keep the window genuinely user-resizable. Scope controls are wrapped
         # into two rows in V0.3.13 so this smaller minimum width is practical.
@@ -100,6 +100,7 @@ class MainWindow(QMainWindow):
         self._worker.sampling_state_changed.connect(self._on_sampling_state_changed)
         self._worker.scope_samples.connect(self._on_scope_samples)
         self._worker.scope_error.connect(self._on_scope_error)
+        self._worker.scope_perf.connect(self._on_scope_perf)
         self._worker.scope_state_changed.connect(self._on_scope_state_changed)
         self._worker.scope_rtt_format.connect(self._on_scope_rtt_format)
         self._thread.start()
@@ -542,6 +543,15 @@ class MainWindow(QMainWindow):
     def _on_scope_error(self, message: str) -> None:
         self._log(f"SCOPE ERROR: {message}")
         QMessageBox.critical(self, "Scope sampling stopped", message)
+
+    def _on_scope_perf(self, poll_ms: float, read_ms: float, decode_ms: float, frames: int, byte_count: int) -> None:
+        if hasattr(self, "scope_page"):
+            self.scope_page.set_worker_perf(poll_ms, read_ms, decode_ms, frames, byte_count)
+        if max(float(poll_ms), float(read_ms), float(decode_ms)) >= 40.0:
+            self._log(
+                f"Scope worker spike: poll={poll_ms:.1f}ms read={read_ms:.1f}ms "
+                f"decode={decode_ms:.1f}ms frames={int(frames)} bytes={int(byte_count)}"
+            )
 
     def _on_scope_state_changed(self, active: bool, detail: str) -> None:
         self._scope_sampling = bool(active)
