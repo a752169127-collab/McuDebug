@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MCU Debug Assistant - 交互式项目理解与开发演进文档</title>
+<style>
+:root{--bg:#fff;--fg:#111;--muted:#666;--line:#d8d8d8;--soft:#f6f6f6;--ok:#176b2c;--warn:#8a5600;--bad:#9c1d1d}
+*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:var(--bg);color:var(--fg);font-family:"Segoe UI","Microsoft YaHei",Arial,sans-serif;line-height:1.65}
+header{position:sticky;top:0;z-index:10;background:#fff;border-bottom:1px solid var(--line)}.top{max-width:1500px;margin:auto;padding:10px 18px;display:flex;gap:12px;align-items:center;flex-wrap:wrap}.brand{font-weight:800}.search{flex:1;min-width:260px;padding:8px 10px;border:1px solid #aaa;border-radius:6px}
+main{max-width:1500px;margin:auto;display:grid;grid-template-columns:250px minmax(0,1fr);gap:26px;padding:22px 18px 60px}nav{position:sticky;top:70px;align-self:start;max-height:calc(100vh - 90px);overflow:auto;border-right:1px solid var(--line);padding-right:14px}nav a{display:block;color:#222;text-decoration:none;padding:6px 8px;border-radius:5px;font-size:14px}nav a:hover{background:var(--soft)}
+h1{font-size:30px;margin:0 0 12px}h2{font-size:23px;border-bottom:1px solid var(--line);padding-bottom:8px;margin-top:42px}h3{font-size:18px;margin-top:26px}p{margin:8px 0 12px}.muted{color:var(--muted)}.card{border:1px solid var(--line);border-radius:8px;padding:15px;background:#fff}.grid3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}.kpi{font-size:24px;font-weight:800}.small{font-size:13px;color:var(--muted)}
+pre{background:#f3f3f3;border:1px solid #ddd;border-radius:7px;padding:12px;overflow:auto;white-space:pre-wrap}code{font-family:Consolas,"Courier New",monospace}table{border-collapse:collapse;width:100%;font-size:14px;margin:12px 0}th,td{border:1px solid #d8d8d8;padding:8px 9px;vertical-align:top}th{background:#f3f3f3;text-align:left}.callout{border-left:4px solid #111;background:#f8f8f8;padding:12px 14px;margin:14px 0}.badge{display:inline-block;padding:2px 7px;border:1px solid #aaa;border-radius:999px;font-size:12px}.ok{color:var(--ok);border-color:#87b495}.warn{color:var(--warn);border-color:#cba86a}.bad{color:var(--bad);border-color:#c58a8a}
+.flow{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.node{border:1px solid #999;border-radius:7px;padding:8px 11px;min-width:115px;text-align:center}.arrow{font-weight:bold}.controls{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0 16px}.filter{border:1px solid #aaa;background:#fff;padding:7px 10px;border-radius:6px;cursor:pointer}.filter.active{background:#111;color:#fff}.version{border-left:4px solid #222;background:#fafafa;padding:11px 13px;margin:10px 0}.vnum{font-weight:800}.problem{border:1px solid #ddd;border-left:4px solid #444;border-radius:6px;padding:11px 13px;margin:10px 0}.problem.open{border-left-color:var(--bad)}.problem.partial{border-left-color:var(--warn)}.problem.solved{border-left-color:var(--ok)}.hidden{display:none!important}
+@media(max-width:1050px){main{grid-template-columns:1fr}nav{position:relative;top:auto;border-right:0;border-bottom:1px solid var(--line);padding-bottom:10px;max-height:none}.grid3{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<header><div class="top"><div class="brand">MCU Debug Assistant · 项目理解 / 交接 / 二次开发</div><input id="q" class="search" placeholder="搜索：HSS / AXF / Stacked / Follow / DWARF / 卡顿..."><span class="muted">V0.3.16</span></div></header>
+<main>
+<nav><b>目录</b>
+<a href="#overview">1. 项目概览</a><a href="#arch">2. 总体架构</a><a href="#features">3. 功能现状</a><a href="#watch">4. Watch</a><a href="#symbol">5. AXF/ELF/DWARF</a><a href="#scope">6. Scope</a><a href="#timeline">7. 版本演进</a><a href="#problems">8. 问题→根因→解决</a><a href="#rules">9. 设计原则</a><a href="#debt">10. 当前技术债</a><a href="#handoff">11. 新人接手路线</a></nav>
+<section id="content">
+<section id="overview" class="searchable"><h1>MCU Debug Assistant</h1><p>一个基于 <b>Python + PySide6 + pyqtgraph + SEGGER J-Link DLL</b> 的 MCU 调试工具，目标体验接近 <b>Keil Watch + J-Scope + AXF Symbol Browser</b>，并作为后续算法回溯、死机分析、自动化调试平台的底座。</p>
+<div class="grid3"><div class="card"><div class="kpi">Read / Write</div><div class="small">JLINK_ReadMemEx / WriteMemEx</div></div><div class="card"><div class="kpi">HSS / RTT</div><div class="small">Scope 高速采样</div></div><div class="card"><div class="kpi">AXF / DWARF</div><div class="small">自动符号与成员解析</div></div></div>
+<div class="callout"><b>核心定位：</b>Watch 负责低速、可写、统计；Scope 负责高速波形；AXF 消除手工地址录入；JLinkWorker 统一持有 J-Link Session。</div></section>
+
+<section id="arch" class="searchable"><h2>2. 总体架构</h2><pre><code>PySide6 GUI
+  ├─ Watch
+  ├─ Scope
+  ├─ Memory R/W
+  └─ Log
+        │
+        ▼
+Data / Display Layer
+  ├─ Statistics
+  ├─ Scope Buffer
+  ├─ Visible Window
+  ├─ Downsample
+  ├─ Gain / Offset
+  └─ Cursor / Probe
+        │
+        ▼
+JLinkWorker (唯一 J-Link Owner)
+  ├─ Connect / Disconnect
+  ├─ ReadMemEx / WriteMemEx
+  ├─ HSS
+  └─ RTT
+        │
+        ▼
+JLink_x64.dll → MCU</code></pre>
+<p>另一条关键链路：</p><pre><code>AXF / ELF / DWARF → Symbol Model → Watch / Scope Channel Definition</code></pre>
+<div class="callout"><b>不可破坏：</b>GUI、Watch、Scope 都不能直接抢 J-Link DLL；所有访问必须统一经过 JLinkWorker。</div></section>
+
+<section id="features" class="searchable"><h2>3. 当前功能现状</h2><table><tr><th>模块</th><th>功能</th><th>状态</th></tr>
+<tr><td>J-Link</td><td>目录扫描、DLL选择、SWD/JTAG、Speed、原生 Target Device Settings</td><td><span class="badge ok">已实现</span></td></tr>
+<tr><td>Memory</td><td>ReadMemEx / WriteMemEx、类型解析、写后回读 Verify</td><td><span class="badge ok">已实机验证</span></td></tr>
+<tr><td>Watch</td><td>多变量、Current/Avg/Min/Max、Enter写值、批量读、Excel单行复制</td><td><span class="badge ok">稳定</span></td></tr>
+<tr><td>AXF/ELF</td><td>符号树、结构体/数组、ARMCC5 DWARF3、Reload Rebind</td><td><span class="badge ok">已验证</span></td></tr>
+<tr><td>Scope HSS</td><td>Overlay/Stacked、Buffer、FPS、Follow、Gain/Offset、Color、Cursor、Hover</td><td><span class="badge warn">可用，手感继续优化</span></td></tr>
+<tr><td>RTT</td><td>JScope_&lt;FORMAT&gt; 兼容路径</td><td><span class="badge warn">架构已接入，实机不足</span></td></tr></table></section>
+
+<section id="watch" class="searchable"><h2>4. Watch 设计</h2><pre><code>Name | Address | Type | Current | Set Value | Average | Min | Max</code></pre>
+<h3>写变量</h3><div class="flow"><div class="node">编辑 Set Value</div><div class="arrow">→</div><div class="node">Enter</div><div class="arrow">→</div><div class="node">WriteMemEx</div><div class="arrow">→</div><div class="node">ReadBack Verify</div></div>
+<h3>性能模型</h3><pre><code>J-Link Sampling: 100 / 500 / 1000 Hz
+Statistics: 每个真实采样点参与
+GUI: 约 25 Hz Snapshot
+
+Sampling Rate != GUI Refresh Rate</code></pre>
+<p>20+变量早期卡顿来自逐单元格高频刷新；通过 Worker 在线统计、Snapshot 批量更新、关闭动态 ResizeToContents、row_id 映射解决。</p>
+<h3>平均值复制</h3><p>复制到剪贴板只保留数值，用 TAB 分隔，直接粘贴 Excel 一行；不弹窗，只写 Log。</p></section>
+
+<section id="symbol" class="searchable"><h2>5. AXF / ELF / DWARF</h2><pre><code>AXF → ELF Symbol Table → DWARF → Struct / Array / Member → Symbol Browser → Watch / Scope</code></pre>
+<h3>ARMCC5 DWARF3 关键兼容</h3><pre><code>BlowerParamsObj = 0x20002894
+m_PosSpeed      offset 132 → 0x20002918
+m_Position      offset 136 → 0x2000291C</code></pre>
+<p>Keil ARMCC5 的 <code>DW_AT_data_member_location</code> 使用 <code>DW_FORM_block + DW_OP_plus_uconst</code>。旧解析器只认 constant/exprloc，导致结构体成员被漏掉；后续增加 ARMCC5 DWARF2/3 专用成员偏移解析。</p>
+<h3>Symbol Search</h3><p>从“每输入一个字符重建 QTableWidget”改成 <b>QStandardItemModel + QSortFilterProxyModel + QTreeView</b>，并加 debounce，搜索不卡。</p>
+<h3>Reload Rebind</h3><pre><code>重新解析 AXF → 按完整 Name 匹配 → 更新 Address/Type → 不存在则删除 → 清旧统计</code></pre></section>
+
+<section id="scope" class="searchable"><h2>6. Scope 设计</h2><h3>HSS Timestamp</h3><pre><code>[Timestamp U32][Payload...]
+Timestamp → X
+Payload   → int16 / uint32 / float ... → Y</code></pre><p>最早固定 1000 的变量画成递增/三角波，根因就是把 Timestamp 当成数据。</p>
+<h3>Raw / Display 分离</h3><pre><code>Raw Buffer
+ ├─ Statistics
+ ├─ CSV
+ ├─ Cursor / Probe
+ └─ Display Pipeline
+      ↓ Visible Window
+      ↓ Peak-Preserve Downsample
+      ↓ Gain / Offset
+      ↓ PlotCurveItem</code></pre>
+<h3>Show / Start / Pause / Follow</h3><table><tr><th>操作</th><th>语义</th></tr><tr><td>Show</td><td>只隐藏/显示，继续采样，历史保留</td></tr><tr><td>Start</td><td>新实验：清旧 Buffer / Statistics，再开始</td></tr><tr><td>Pause</td><td>停采样但保留当前分析现场</td></tr><tr><td>Follow</td><td>只移动 X，不自动改 Y</td></tr></table>
+<h3>Gain / Offset</h3><pre><code>Y_display = Y_raw × Gain + Offset
++ / -         调 Gain
+Ctrl + / -    调 Offset</code></pre>
+<h3>History / Analyze</h3><p>Follow OFF 时，右侧新数据继续进入 Raw Buffer 和 Statistics，但当前历史窗口不重复 setData；用户拖动/缩放后才重画新窗口。</p>
+<h3>Interaction Mode / Cache</h3><p>拖动期间冻结 Curve setData、Hover、表格刷新等非必要 GUI 工作，只保留 ViewBox Transform；HSS/RTT、Raw Buffer、Statistics 继续。松手后按最终 XRange 精确重画。</p></section>
+
+<section id="timeline" class="searchable"><h2>7. 版本演进</h2><div class="controls"><button class="filter active" data-f="all">全部</button><button class="filter" data-f="base">底座</button><button class="filter" data-f="watch">Watch</button><button class="filter" data-f="symbol">AXF</button><button class="filter" data-f="scope">Scope</button><button class="filter" data-f="perf">性能</button></div>
+<div class="version" data-tags="base"><span class="vnum">V0.1</span> — J-Link Connect / ReadMemEx / WriteMemEx / Verify / 类型系统。</div>
+<div class="version" data-tags="base"><span class="vnum">V0.1.1~0.1.2</span> — DLL目录、Speed下拉、原生 Target Device Settings。</div>
+<div class="version" data-tags="watch"><span class="vnum">V0.2~0.2.1</span> — Watch、多变量统计、Enter 写值。</div>
+<div class="version" data-tags="symbol watch"><span class="vnum">V0.2.2~0.2.5</span> — AXF/ELF、DWARF、结构体成员、快速搜索、Reload Rebind、多选删除。</div>
+<div class="version" data-tags="watch perf"><span class="vnum">V0.2.6</span> — Watch Sampling/GUI 解耦，解决20+变量卡顿。</div>
+<div class="version" data-tags="scope"><span class="vnum">V0.3</span> — Scope 首版：HSS/RTT、Overlay/Stacked、游标。</div>
+<div class="version" data-tags="scope"><span class="vnum">V0.3.1</span> — HSS Timestamp 正确拆包。</div>
+<div class="version" data-tags="scope"><span class="vnum">V0.3.2~0.3.7</span> — Buffer/FPS/Follow/ViewAll/Gain/Offset/CSV/右键交互。</div>
+<div class="version" data-tags="scope perf"><span class="vnum">V0.3.8</span> — Chunked Buffer，解决长期运行 np.concatenate 越跑越卡。</div>
+<div class="version" data-tags="scope perf"><span class="vnum">V0.3.9~0.3.13</span> — Hover残影、绝对采样索引、固定Render Clock、Follow限频、Stacked稳定性、颜色、窗口布局。</div>
+<div class="version" data-tags="scope perf"><span class="vnum">V0.3.14~0.3.15</span> — Show不清数据、Start清旧实验、History Mode、不Follow历史窗口静态化。</div>
+<div class="version" data-tags="scope perf"><span class="vnum">V0.3.16</span> — Interaction Cache、PlotCurveItem、拖动优先。</div></section>
+
+<section id="problems" class="searchable"><h2>8. 问题 → 根因 → 解决</h2>
+<div class="problem solved"><b>固定值变递增三角波</b><p>HSS Timestamp 被当数据 → Timestamp/Payload 分离。</p></div>
+<div class="problem solved"><b>20+ Watch 卡</b><p>逐Cell高频刷新 → Worker统计 + Snapshot + GUI限频。</p></div>
+<div class="problem solved"><b>AXF 搜索输入一个字母就卡</b><p>每键重建表 → Model/View + ProxyFilter。</p></div>
+<div class="problem solved"><b>结构体成员解析不到</b><p>ARMCC5 DW_FORM_block + DW_OP_plus_uconst → 增加 DWARF3 成员偏移解析。</p></div>
+<div class="problem solved"><b>Scope 越跑越卡</b><p>每批 np.concatenate 全历史 → Chunked Buffer。</p></div>
+<div class="problem solved"><b>X轴放大后“点变少”</b><p>先全局降采样再局部显示 → 先 Visible Window，再 Peak-Preserve Downsample。</p></div>
+<div class="problem partial"><b>Stacked + Follow 手感不够丝滑</b><p>多 Plot/ViewBox/Scene 和 pyqtgraph 更新成本高。已做 Follow限频、Render Clock、History/Interaction Mode、Interaction Cache，但仍未达到 J-Scope。</p></div>
+<div class="problem open"><b>Requested 1000 Hz → Actual ~496~499 Hz</b><p>更像 HSS/J-Link 实际吞吐限制，需要独立做 J-Link 型号、SWD速度、变量数量/宽度、HSS period、DLL版本基准。</p></div></section>
+
+<section id="rules" class="searchable"><h2>9. 不可破坏的设计原则</h2><ol><li>GUI不直接访问J-Link。</li><li>Sampling 与 GUI FPS 分离。</li><li>Raw 与 Display 分离。</li><li>Gain/Offset只影响显示。</li><li>Show不影响采集/Buffer。</li><li>Pause不清数据，Start才清旧实验。</li><li>AXF Reload必须重绑地址。</li><li>Symbol Search不能每键重建UI。</li><li>长缓存不能反复整段 concatenate。</li><li>先裁Visible Window，再Downsample。</li><li>Downsample保峰谷。</li><li>拖动期间暂停非必要GUI任务。</li><li>Follow只动X不动Y。</li><li>Actual Hz必须独立测量。</li></ol></section>
+
+<section id="debt" class="searchable"><h2>10. 当前技术债</h2><table><tr><th>问题</th><th>现状</th><th>下一步</th></tr><tr><td>J-Scope级拖动丝滑</td><td>仍有差距</td><td>继续修补或单Scene+LOD+Render Cache</td></tr><tr><td>Stacked性能</td><td>比Overlay重</td><td>GraphicsLayoutWidget / Single Scene</td></tr><tr><td>HSS 1000→~500Hz</td><td>未定位</td><td>吞吐基准矩阵</td></tr><tr><td>J-Link DLL跨电脑</td><td>版本差异可能影响Device Dialog</td><td>版本/Capability检测</td></tr><tr><td>RTT</td><td>架构已接入</td><td>补真实板级验证</td></tr></table></section>
+
+<section id="handoff" class="searchable"><h2>11. 新人接手路线</h2><ol><li>先读 JLinkWorker：谁持有 Session，谁能访问 DLL。</li><li>再读 Symbol Model：AXF 如何生成 Watch/Scope channel。</li><li>再读 Watch：理解 Sampling 与 GUI Snapshot 解耦。</li><li>最后读 Scope：Raw Buffer → Statistics → Display Pipeline → ViewBox。</li><li>遇到卡顿先计时定位，不要凭感觉乱改：HSS Read、Buffer append、Visible Slice、Downsample、setData、ViewBox、Table refresh。</li></ol><div class="callout"><b>新人只要掌握两条链：</b><br><code>JLinkWorker → Acquisition → Raw Buffer → Statistics / Display → Watch / Scope</code><br><code>AXF → Symbol Model → Watch / Scope Channel Definition</code></div></section>
+</section></main>
+<script>
+const q=document.getElementById('q');q.addEventListener('input',()=>{const s=q.value.trim().toLowerCase();document.querySelectorAll('.searchable,.version,.problem').forEach(e=>e.classList.toggle('hidden',!!s&&!e.innerText.toLowerCase().includes(s)))})
+document.querySelectorAll('.filter').forEach(b=>b.addEventListener('click',()=>{document.querySelectorAll('.filter').forEach(x=>x.classList.remove('active'));b.classList.add('active');const f=b.dataset.f;document.querySelectorAll('.version').forEach(v=>v.style.display=(f==='all'||v.dataset.tags.includes(f))?'':'none')}))
+</script>
+</body></html>

@@ -3,21 +3,24 @@ from __future__ import annotations
 import csv
 import json
 import math
+import time
 from datetime import datetime
-from dataclasses import dataclass
 
 import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCore import Qt, Signal, QTimer
-from PySide6.QtGui import QIntValidator
+from PySide6.QtGui import QBrush, QColor, QIntValidator
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
     QComboBox,
+    QColorDialog,
     QFileDialog,
+    QGridLayout,
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QFrame,
     QMenu,
     QPushButton,
     QSpinBox,
@@ -30,24 +33,33 @@ from PySide6.QtWidgets import (
 
 from core.datatype import supported_types
 from core.scope import ScopeChannelSpec
+from core.scope_buffer import ScopeDataStore
 
 
 class ScopeChannelTable(QTableWidget):
     definition_changed = Signal()
     display_changed = Signal(object)
+    visibility_changed = Signal(object)
     selected_channel_changed = Signal(object)
+    command_requested = Signal(str)
+    color_changed = Signal(object)
 
     COL_VISIBLE = 0
-    COL_NAME = 1
-    COL_ADDRESS = 2
-    COL_TYPE = 3
-    COL_CURRENT = 4
-    COL_AVG = 5
-    COL_MIN = 6
-    COL_MAX = 7
-    COL_GAIN = 8
-    COL_OFFSET = 9
-    HEADERS = ["Show", "Name", "Address", "Type", "Current", "Average", "Min", "Max", "Gain", "Offset"]
+    COL_COLOR = 1
+    COL_NAME = 2
+    COL_ADDRESS = 3
+    COL_TYPE = 4
+    COL_CURRENT = 5
+    COL_AVG = 6
+    COL_MIN = 7
+    COL_MAX = 8
+    COL_GAIN = 9
+    COL_OFFSET = 10
+    HEADERS = ["Show", "", "Name", "Address", "Type", "Current", "Average", "Min", "Max", "Gain", "Offset"]
+    DEFAULT_COLORS = [
+        "#ff3030", "#00e5ff", "#2979ff", "#00e676", "#ffd740",
+        "#e040fb", "#ff6d00", "#64ffda", "#ffffff", "#7c4dff",
+    ]
 
     def __init__(self, parent=None) -> None:
         super().__init__(0, len(self.HEADERS), parent)
@@ -60,7 +72,8 @@ class ScopeChannelTable(QTableWidget):
         header = self.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         header.setSectionResizeMode(self.COL_NAME, QHeaderView.ResizeMode.Stretch)
-        self.setColumnWidth(self.COL_VISIBLE, 52)
+        self.setColumnWidth(self.COL_VISIBLE, 48)
+        self.setColumnWidth(self.COL_COLOR, 30)
         self.setColumnWidth(self.COL_ADDRESS, 108)
         self.setColumnWidth(self.COL_TYPE, 82)
         for col in (self.COL_CURRENT, self.COL_AVG, self.COL_MIN, self.COL_MAX):
@@ -72,17 +85,28 @@ class ScopeChannelTable(QTableWidget):
         self._internal_update = False
         self.itemChanged.connect(self._item_changed)
         self.itemSelectionChanged.connect(self._emit_selected)
+        self.cellDoubleClicked.connect(self._cell_double_clicked)
 
     def _item_changed(self, item: QTableWidgetItem) -> None:
         if self._internal_update:
             return
-        if item.column() in (self.COL_GAIN, self.COL_OFFSET):
+        if item.column() == self.COL_VISIBLE:
+            # Show is display state only. It must never redefine HSS channels or
+            # disturb the retained raw Scope buffer. This mirrors J-Scope: a
+            # hidden channel keeps sampling and can be shown later with its full
+            # capture history intact.
+            cid = self._channel_id_for_row(item.row())
+            self.visibility_changed.emit(cid)
+        elif item.column() in (self.COL_GAIN, self.COL_OFFSET):
             try:
                 float(item.text().strip())
             except ValueError:
                 return
             cid = self._channel_id_for_row(item.row())
             self.display_changed.emit(cid)
+        elif item.column() == self.COL_COLOR:
+            cid = self._channel_id_for_row(item.row())
+            self.color_changed.emit(cid)
         else:
             self.definition_changed.emit()
 
@@ -112,6 +136,7 @@ class ScopeChannelTable(QTableWidget):
         channel_id: int | None = None,
         gain: float = 1.0,
         offset: float = 0.0,
+        color: str | None = None,
     ) -> int:
         row = self.rowCount()
         self.insertRow(row)
@@ -136,6 +161,8 @@ class ScopeChannelTable(QTableWidget):
             self.setItem(row, col, self._readonly_item())
         self.setItem(row, self.COL_GAIN, QTableWidgetItem(f"{float(gain):.9g}"))
         self.setItem(row, self.COL_OFFSET, QTableWidgetItem(f"{float(offset):.9g}"))
+        color_text = str(color or self.DEFAULT_COLORS[(cid - 1) % len(self.DEFAULT_COLORS)])
+        self._set_color_item(row, color_text)
         self._update_row_editability(row)
         if self.rowCount() == 1:
             self.selectRow(0)
@@ -147,7 +174,8 @@ class ScopeChannelTable(QTableWidget):
             cid = self._channel_id_for_row(row)
             name_item = self.item(row, self.COL_NAME)
             if cid is not None and name_item is not None:
-                old_display[(cid, name_item.text().strip())] = self.gain_offset(cid)
+                gain, offset = self.gain_offset(cid)
+                old_display[(cid, name_item.text().strip())] = (gain, offset, self.channel_color(cid))
         blocked = self.blockSignals(True)
         self._internal_update = True
         try:
@@ -156,7 +184,10 @@ class ScopeChannelTable(QTableWidget):
             for ch in channels:
                 cid = int(ch.get("channel_id", self.rowCount() + 1))
                 name = str(ch.get("name", f"RTT_Value{self.rowCount()+1}"))
-                gain, offset = old_display.get((cid, name), (1.0, 0.0))
+                gain, offset, color = old_display.get(
+                    (cid, name),
+                    (1.0, 0.0, self.DEFAULT_COLORS[(max(1, cid) - 1) % len(self.DEFAULT_COLORS)]),
+                )
                 self.add_channel(
                     name=name,
                     address="-",
@@ -165,6 +196,7 @@ class ScopeChannelTable(QTableWidget):
                     channel_id=cid,
                     gain=gain,
                     offset=offset,
+                    color=color,
                 )
             self._rtt_mode = True
             self._update_editability()
@@ -197,7 +229,65 @@ class ScopeChannelTable(QTableWidget):
             self.remove_selected()
             event.accept()
             return
+        key = event.key()
+        ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+        plus = key in (Qt.Key.Key_Plus, Qt.Key.Key_Equal)
+        minus = key in (Qt.Key.Key_Minus, Qt.Key.Key_Underscore)
+        if plus:
+            self.command_requested.emit("offset_up" if ctrl else "gain_up")
+            event.accept()
+            return
+        if minus:
+            self.command_requested.emit("offset_down" if ctrl else "gain_down")
+            event.accept()
+            return
         super().keyPressEvent(event)
+
+    def _set_color_item(self, row: int, color_text: str) -> None:
+        color = QColor(str(color_text))
+        if not color.isValid():
+            color = QColor(self.DEFAULT_COLORS[row % len(self.DEFAULT_COLORS)])
+        item = self.item(row, self.COL_COLOR)
+        old_guard = self._internal_update
+        self._internal_update = True
+        try:
+            if item is None:
+                item = QTableWidgetItem()
+                item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+                self.setItem(row, self.COL_COLOR, item)
+            # J-Scope-style pure swatch: keep the actual color as metadata and
+            # deliberately show no #RRGGBB text in the table.
+            item.setText("")
+            item.setData(Qt.ItemDataRole.UserRole, color.name())
+            item.setBackground(QBrush(color))
+            item.setToolTip(f"波形颜色 {color.name().upper()}；双击修改")
+        finally:
+            self._internal_update = old_guard
+
+    def _cell_double_clicked(self, row: int, column: int) -> None:
+        if column != self.COL_COLOR:
+            return
+        cid = self._channel_id_for_row(row)
+        if cid is None:
+            return
+        current = QColor(self.channel_color(cid))
+        chosen = QColorDialog.getColor(current, self, "选择波形颜色")
+        if not chosen.isValid():
+            return
+        self._set_color_item(row, chosen.name())
+        self.color_changed.emit(cid)
+
+    def channel_color(self, channel_id: int) -> str:
+        for row in range(self.rowCount()):
+            if self._channel_id_for_row(row) != int(channel_id):
+                continue
+            item = self.item(row, self.COL_COLOR)
+            if item is not None:
+                stored = item.data(Qt.ItemDataRole.UserRole)
+                color = QColor(str(stored or ""))
+                if color.isValid():
+                    return color.name()
+        return self.DEFAULT_COLORS[(max(1, int(channel_id)) - 1) % len(self.DEFAULT_COLORS)]
 
     def contains_channel(self, name: str, address: int) -> bool:
         for row in range(self.rowCount()):
@@ -236,7 +326,7 @@ class ScopeChannelTable(QTableWidget):
                 name=name_item.text().strip() or f"Value{cid}",
                 address=address,
                 type_name=combo.currentText(),
-                enabled=visible.checkState() == Qt.CheckState.Checked,
+                enabled=True,  # Show only hides/shows; hidden channels keep sampling/history.
             ))
         return result
 
@@ -357,8 +447,22 @@ class ScopeChannelTable(QTableWidget):
         return f"{f:.9g}" if math.isfinite(f) else "-"
 
     def set_definition_editable(self, editable: bool) -> None:
+        # setFlags()/setEnabled() can cause QTableWidget to emit itemChanged on
+        # some Qt/Windows builds. During Pause, that previously escaped through
+        # _item_changed() as definition_changed -> _rebuild_plots(), replacing
+        # the current ViewBox with a fresh default range. The raw Scope buffer
+        # was still present, but every curve appeared empty, which looked exactly
+        # like Pause had cleared the capture. Editability is UI state only, so
+        # suppress table notifications while changing it.
         self._definition_editable = bool(editable)
-        self._update_editability()
+        old_guard = self._internal_update
+        blocked = self.blockSignals(True)
+        self._internal_update = True
+        try:
+            self._update_editability()
+        finally:
+            self._internal_update = old_guard
+            self.blockSignals(blocked)
 
     def _update_editability(self) -> None:
         for row in range(self.rowCount()):
@@ -432,15 +536,17 @@ class ScopeChannelTable(QTableWidget):
         if self._rtt_mode:
             return "[]"
         rows = []
+        visible_ids = set(self.visible_channel_ids())
         for spec in self.specs():
             gain, offset = self.gain_offset(spec.channel_id)
             rows.append({
                 "name": spec.name,
                 "address": spec.address,
                 "type": spec.type_name,
-                "enabled": spec.enabled,
+                "enabled": spec.channel_id in visible_ids,
                 "gain": gain,
                 "offset": offset,
+                "color": self.channel_color(spec.channel_id),
             })
         return json.dumps(rows, ensure_ascii=False)
 
@@ -459,6 +565,7 @@ class ScopeChannelTable(QTableWidget):
                 bool(row.get("enabled", True)),
                 gain=float(row.get("gain", 1.0)),
                 offset=float(row.get("offset", 0.0)),
+                color=str(row.get("color") or "") or None,
             )
 
     def _emit_selected(self) -> None:
@@ -474,10 +581,50 @@ class ScopePlotWidget(pg.PlotWidget):
 
     command_requested = Signal(str)
     mouse_left = Signal()
+    left_drag_started = Signal()
+    left_drag_finished = Signal()
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._left_press_pos = None
+        self._left_drag_emitted = False
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
         self.setFocus(Qt.FocusReason.MouseFocusReason)
+        if event.button() == Qt.MouseButton.LeftButton:
+            try:
+                self._left_press_pos = event.position()
+            except Exception:
+                self._left_press_pos = None
+            self._left_drag_emitted = False
         super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        # A normal left click must not disable live follow. Only when the pointer
+        # has actually moved a few pixels with the left button held do we treat
+        # the gesture as a manual waveform pan/drag.
+        if (
+            not self._left_drag_emitted
+            and self._left_press_pos is not None
+            and bool(event.buttons() & Qt.MouseButton.LeftButton)
+        ):
+            try:
+                delta = event.position() - self._left_press_pos
+                if abs(float(delta.x())) + abs(float(delta.y())) >= 4.0:
+                    self._left_drag_emitted = True
+                    self.left_drag_started.emit()
+            except Exception:
+                pass
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        super().mouseReleaseEvent(event)
+        if event.button() == Qt.MouseButton.LeftButton:
+            was_dragging = self._left_drag_emitted
+            self._left_press_pos = None
+            self._left_drag_emitted = False
+            if was_dragging:
+                self.left_drag_finished.emit()
 
     def leaveEvent(self, event) -> None:  # noqa: N802
         self.mouse_left.emit()
@@ -500,142 +647,23 @@ class ScopePlotWidget(pg.PlotWidget):
         super().keyPressEvent(event)
 
 
-class ScopeDataStore:
-    """In-memory Scope buffer plus raw-value session statistics.
-
-    Stopping acquisition does not clear this store.  If a restarted HSS/RTT source
-    restarts its timestamp at zero, the new chunk is shifted forward so paused
-    captures remain one continuous X timeline for analysis.
-    """
-
-    def __init__(self, seconds: float = 30.0, max_points: int = 1500000) -> None:
-        self.seconds = float(seconds)
-        self.max_points = int(max_points)
-        self.x = np.empty(0, dtype=np.float64)
-        self.values: dict[int, np.ndarray] = {}
-        self.x_is_time = True
-        self._stats: dict[int, dict[str, float | int | None]] = {}
-
-    def set_seconds(self, seconds: float) -> None:
-        self.seconds = max(1.0, float(seconds))
-        self._trim()
-
-    def clear(self) -> None:
-        self.x = np.empty(0, dtype=np.float64)
-        self.values = {}
-        self._stats = {}
-
-    def append(self, times, values: dict[int, list], x_is_time: bool) -> None:
-        x_new = np.asarray(times, dtype=np.float64)
-        if x_new.size == 0:
-            return
-        self.x_is_time = bool(x_is_time)
-        # HSS/RTT decoder timestamps are relative to each acquisition start.  On
-        # resume, keep the old capture and shift the restarted sequence forward.
-        if self.x.size and x_new[0] <= self.x[-1]:
-            if x_new.size >= 2:
-                diffs = np.diff(x_new)
-                positive = diffs[diffs > 0]
-                step = float(np.median(positive)) if positive.size else (1e-6 if x_is_time else 1.0)
-            elif self.x.size >= 2:
-                diffs = np.diff(self.x)
-                positive = diffs[diffs > 0]
-                step = float(np.median(positive)) if positive.size else (1e-6 if x_is_time else 1.0)
-            else:
-                step = 1e-6 if x_is_time else 1.0
-            x_new = x_new + (float(self.x[-1]) + step - float(x_new[0]))
-
-        old_n = self.x.size
-        self.x = np.concatenate((self.x, x_new))
-        all_ids = set(self.values) | {int(k) for k in values}
-        for cid in all_ids:
-            old = self.values.get(cid, np.full(old_n, np.nan, dtype=np.float64))
-            seq = values.get(cid)
-            if seq is None:
-                new = np.full(x_new.size, np.nan, dtype=np.float64)
-            else:
-                new = np.asarray(seq, dtype=np.float64)
-                if new.size != x_new.size:
-                    padded = np.full(x_new.size, np.nan, dtype=np.float64)
-                    padded[: min(new.size, x_new.size)] = new[: x_new.size]
-                    new = padded
-                self._update_stats(int(cid), new)
-            self.values[cid] = np.concatenate((old, new))
-        self._trim()
-
-    def _update_stats(self, channel_id: int, values: np.ndarray) -> None:
-        finite = values[np.isfinite(values)]
-        if finite.size == 0:
-            return
-        state = self._stats.setdefault(channel_id, {
-            "count": 0,
-            "sum": 0.0,
-            "current": None,
-            "minimum": None,
-            "maximum": None,
-        })
-        state["count"] = int(state["count"]) + int(finite.size)
-        state["sum"] = float(state["sum"]) + float(np.sum(finite, dtype=np.float64))
-        state["current"] = float(finite[-1])
-        chunk_min = float(np.min(finite))
-        chunk_max = float(np.max(finite))
-        state["minimum"] = chunk_min if state["minimum"] is None else min(float(state["minimum"]), chunk_min)
-        state["maximum"] = chunk_max if state["maximum"] is None else max(float(state["maximum"]), chunk_max)
-
-    def stats_snapshot(self) -> dict[int, dict]:
-        result = {}
-        for cid, s in self._stats.items():
-            count = int(s["count"])
-            result[cid] = {
-                "count": count,
-                "current": s["current"],
-                "average": (float(s["sum"]) / count) if count else None,
-                "minimum": s["minimum"],
-                "maximum": s["maximum"],
-            }
-        return result
-
-    def _trim(self) -> None:
-        if self.x.size == 0:
-            return
-        start = 0
-        if self.x_is_time and self.x[-1] - self.x[0] > self.seconds:
-            cutoff = self.x[-1] - self.seconds
-            start = int(np.searchsorted(self.x, cutoff, side="left"))
-        if self.x.size - start > self.max_points:
-            start = self.x.size - self.max_points
-        if start > 0:
-            self.x = self.x[start:]
-            for cid in list(self.values):
-                self.values[cid] = self.values[cid][start:]
-
-    def curve(self, channel_id: int, display_limit: int = 10000) -> tuple[np.ndarray, np.ndarray]:
-        y = self.values.get(int(channel_id))
-        if y is None or self.x.size == 0:
-            return np.empty(0), np.empty(0)
-        if self.x.size <= display_limit:
-            return self.x, y
-        step = max(1, math.ceil(self.x.size / display_limit))
-        return self.x[::step], y[::step]
-
-    def nearest(self, channel_id: int, x_value: float) -> tuple[float, float] | None:
-        y = self.values.get(int(channel_id))
-        if y is None or self.x.size == 0:
-            return None
-        idx = int(np.searchsorted(self.x, x_value))
-        if idx <= 0:
-            idx = 0
-        elif idx >= self.x.size:
-            idx = self.x.size - 1
-        elif abs(self.x[idx - 1] - x_value) <= abs(self.x[idx] - x_value):
-            idx -= 1
-        value = float(y[idx])
-        if not math.isfinite(value):
-            return None
-        return float(self.x[idx]), value
-
-
 class ScopePage(QWidget):
+    # Follow scrolling is adaptive. Overlay may scroll at the requested GUI FPS;
+    # Stacked shares a bounded total ViewBox update budget across all plots.
+    # With 3 channels and FPS=60 this gives ~30 Hz X scrolling instead of the
+    # visibly stepped 12 Hz used by V0.3.11, while avoiding the old 180 range
+    # writes/s path that could freeze Qt.
+    FOLLOW_STACKED_VIEWBOX_BUDGET_HZ = 90.0
+    STATS_REFRESH_MAX_HZ = 10.0
+    # Curve data itself does not need to be rebuilt at the full viewport FPS.
+    # Keeping curve materialization at <=30 Hz leaves much more GUI budget for
+    # smooth ViewBox transforms while Follow can still animate at 60 FPS.
+    CURVE_REFRESH_MAX_HZ = 30.0
+    # During a manual pan all curves are frozen into an interaction cache, so
+    # follower ViewBoxes can be synchronized more frequently without also
+    # paying curve.setData()/downsampling cost on every mouse move.
+    MANUAL_STACKED_SYNC_HZ = 60.0
+
     start_requested = Signal(str, object, int)
     stop_requested = Signal()
     add_symbol_requested = Signal()
@@ -654,9 +682,13 @@ class ScopePage(QWidget):
         self._plots: list[pg.PlotWidget] = []
         self._curves: dict[int, object] = {}
         self._plot_channel_ids: dict[int, int | None] = {}
-        self._hover_lines: list[pg.InfiniteLine] = []
+        self._curve_colors: dict[int, object] = {}
         self._mouse_proxies: list[object] = []
+        self._plot_signal_connections: list[tuple[object, object]] = []
+        self._rebuilding_plots = False
         self._hover_x: float | None = None
+        self._hover_plot: pg.PlotWidget | None = None
+        self._hover_scene_pos = None
         self._x_lines: dict[str, list[pg.InfiniteLine]] = {"X1": [], "X2": []}
         self._y_lines: dict[str, pg.InfiniteLine | None] = {"Y1": None, "Y2": None}
         self._cursor_values: dict[str, float | None] = {"X1": None, "X2": None, "Y1": None, "Y2": None}
@@ -669,11 +701,45 @@ class ScopePage(QWidget):
         # that window so its right edge stays on the newest sample.
         self._follow_x_span: float | None = None
         self._applying_follow_range = False
+        # Do not use pyqtgraph ViewBox XLink for Stacked live scrolling. With
+        # three or more linked ViewBoxes, repeated setXRange() can trigger a
+        # cascade of reciprocal linked-view updates on Windows. We synchronize
+        # X ranges ourselves under this re-entry guard instead.
+        self._syncing_x_range = False
+        self._last_follow_right: float | None = None
+        self._last_follow_span: float | None = None
+        self._last_follow_scroll_at = 0.0
+        self._last_stats_refresh_at = 0.0
+        self._last_curve_refresh_at = 0.0
+        self._curve_data_pending = False
+        self._user_dragging = False
+        # Interaction cache: while panning, curves contain a lightweight
+        # full-buffer snapshot and never receive setData().  Mouse movement then
+        # mostly changes the ViewBox transform instead of rebuilding waveform
+        # arrays.  On release the current viewport is redrawn at full detail.
+        self._interaction_cache_active = False
+        self._interaction_cache_range: tuple[float, float] | None = None
+        self._latest_data_arrival_at = 0.0
+        self._latest_data_x: float | None = None
+        self._render_frames = 0
+        self._render_rate_started_at = time.perf_counter()
 
         # Scope acquisition and rendering are intentionally decoupled. Raw samples
         # are appended whenever the worker emits a chunk (up to 60 Hz), while
         # pyqtgraph redraws at the user-selected FPS.
         self._render_dirty = False
+        # Rendering has two independent causes: new acquisition data and a
+        # changed viewport/display transform. When live-follow is OFF, samples
+        # arriving to the right of a fixed historical X window do not change
+        # what is visible, so we intentionally skip curve.setData(). This is
+        # the key to keeping history pan/zoom responsive while acquisition keeps
+        # running in the background.
+        self._view_dirty = True
+        self._force_curve_redraw = True
+        self._last_rendered_data_first_x: float | None = None
+        self._last_rendered_data_last_x: float | None = None
+        self._pending_shared_x_range: tuple[float, float, object] | None = None
+        self._last_manual_x_sync_at = 0.0
         self._latest_actual_hz = 0.0
         self._render_timer = QTimer(self)
         self._render_timer.setTimerType(Qt.TimerType.PreciseTimer)
@@ -703,12 +769,28 @@ class ScopePage(QWidget):
         self.channel_table.setMaximumHeight(260)
         self.channel_table.definition_changed.connect(self._rebuild_plots)
         self.channel_table.display_changed.connect(self._display_transform_changed)
+        self.channel_table.visibility_changed.connect(self._channel_visibility_changed)
         self.channel_table.selected_channel_changed.connect(self._selected_channel_changed)
+        self.channel_table.command_requested.connect(self._table_key_command)
+        self.channel_table.color_changed.connect(self._channel_color_changed)
         splitter.addWidget(self.channel_table)
         splitter.setStretchFactor(0, 5)
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([620, 170])
         layout.addWidget(splitter, 1)
+
+        # Mouse probe is a QWidget overlay instead of a pyqtgraph InfiniteLine.
+        # A data-coordinate InfiniteLine is translated by every live-follow X-range
+        # change even when the mouse itself is stationary; on some Windows/Qt
+        # paint paths that produced the accumulated vertical "ghost lines" seen in
+        # long-running Stacked captures.  The pixel overlay stays attached to the
+        # mouse and does not invalidate any PlotDataItem.
+        self.hover_vline = QFrame(self.plot_host)
+        self.hover_vline.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.hover_vline.setFrameShape(QFrame.Shape.NoFrame)
+        self.hover_vline.setStyleSheet("background: rgba(210, 210, 210, 180);")
+        self.hover_vline.setFixedWidth(1)
+        self.hover_vline.hide()
 
         self.hover_label = QLabel(self.plot_host)
         self.hover_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
@@ -722,8 +804,13 @@ class ScopePage(QWidget):
         self._source_changed("HSS")
         self._fps_changed()
 
-    def _build_toolbar(self) -> QHBoxLayout:
-        bar = QHBoxLayout()
+    def _build_toolbar(self) -> QGridLayout:
+        # Two compact rows keep the main window genuinely horizontally resizable.
+        # The old one-line HBox imposed a very large minimum width because every
+        # Scope control contributed to the layout's minimumSizeHint.
+        bar = QGridLayout()
+        bar.setHorizontalSpacing(8)
+        bar.setVerticalSpacing(4)
         self.source_combo = QComboBox()
         self.source_combo.addItems(["HSS", "RTT"])
         self.source_combo.currentTextChanged.connect(self._source_changed)
@@ -739,18 +826,18 @@ class ScopePage(QWidget):
         self.sample_hz_spin.valueChanged.connect(self._update_period_label)
         self.view_combo = QComboBox()
         self.view_combo.addItems(["Overlay", "Stacked"])
-        self.view_combo.currentTextChanged.connect(lambda *_: self._rebuild_plots())
+        self.view_combo.currentTextChanged.connect(self._view_changed)
         self.buffer_seconds_spin = QSpinBox()
         self.buffer_seconds_spin.setRange(1, 120)
         self.buffer_seconds_spin.setValue(int(self.DEFAULT_BUFFER_SECONDS))
         self.buffer_seconds_spin.setSuffix(" s")
-        self.buffer_seconds_spin.setToolTip("Scope 内存缓存时间；导出 CSV 导出当前缓存中的原始采样数据")
+        self.buffer_seconds_spin.setToolTip("Scope 内存缓存时间；右键波形可导出当前缓存中的原始采样数据")
         self.buffer_seconds_spin.valueChanged.connect(self._buffer_seconds_changed)
         self.fps_combo = QComboBox()
         self.fps_combo.setEditable(True)
         self.fps_combo.addItems(["1", "2", "5", "10", "15", "20", "25", "30", "40", "50", "60"])
         self.fps_combo.setCurrentText("30")
-        self.fps_combo.setToolTip("Scope 波形界面刷新率，1~60 FPS；不改变 HSS/RTT 实际采样频率")
+        self.fps_combo.setToolTip("Scope 固定渲染时钟 1~60 FPS；不改变 HSS/RTT 实际采样频率")
         if self.fps_combo.lineEdit() is not None:
             self.fps_combo.lineEdit().setValidator(QIntValidator(1, 60, self.fps_combo))
             self.fps_combo.lineEdit().editingFinished.connect(self._fps_changed)
@@ -759,7 +846,7 @@ class ScopePage(QWidget):
         self.view_all_btn.clicked.connect(self.view_all)
         self.follow_latest_check = QCheckBox("跟随最新数据")
         self.follow_latest_check.setChecked(True)
-        self.follow_latest_check.setToolTip("勾选后仍可手动缩放 X/Y；程序只保存当前 X 窗口宽度并随最新样本向右滚动，Y 轴不自动变化")
+        self.follow_latest_check.setToolTip("勾选后按固定渲染节拍平滑滚动；手动左键拖动会自动取消跟随")
         self.follow_latest_check.toggled.connect(self._follow_latest_toggled)
         self.actual_label = QLabel("Actual: -")
         self.start_btn = QPushButton("开始采样")
@@ -767,27 +854,23 @@ class ScopePage(QWidget):
         self.stop_btn = QPushButton("暂停采样")
         self.stop_btn.clicked.connect(self.stop_requested.emit)
 
-        bar.addWidget(QLabel("Source"))
-        bar.addWidget(self.source_combo)
-        bar.addWidget(self.add_btn)
-        bar.addWidget(self.remove_btn)
-        bar.addSpacing(12)
-        bar.addWidget(QLabel("Sampling"))
-        bar.addWidget(self.sample_hz_spin)
-        bar.addWidget(self.period_label)
-        bar.addSpacing(12)
-        bar.addWidget(QLabel("View"))
-        bar.addWidget(self.view_combo)
-        bar.addWidget(QLabel("Buffer"))
-        bar.addWidget(self.buffer_seconds_spin)
-        bar.addWidget(QLabel("FPS"))
-        bar.addWidget(self.fps_combo)
-        bar.addWidget(self.view_all_btn)
-        bar.addWidget(self.follow_latest_check)
-        bar.addWidget(self.actual_label)
-        bar.addStretch(1)
-        bar.addWidget(self.start_btn)
-        bar.addWidget(self.stop_btn)
+        # Row 0: acquisition / display setup.
+        widgets0 = [
+            QLabel("Source"), self.source_combo, self.add_btn, self.remove_btn,
+            QLabel("Sampling"), self.sample_hz_spin, self.period_label,
+            QLabel("View"), self.view_combo, QLabel("Buffer"), self.buffer_seconds_spin,
+            QLabel("FPS"), self.fps_combo,
+        ]
+        for col, widget in enumerate(widgets0):
+            bar.addWidget(widget, 0, col)
+
+        # Row 1: view state and transport; stretch before Start/Pause.
+        bar.addWidget(self.view_all_btn, 1, 0, 1, 2)
+        bar.addWidget(self.follow_latest_check, 1, 2, 1, 2)
+        bar.addWidget(self.actual_label, 1, 4, 1, 3)
+        bar.setColumnStretch(7, 1)
+        bar.addWidget(self.start_btn, 1, 11)
+        bar.addWidget(self.stop_btn, 1, 12)
         return bar
 
     def set_connected(self, connected: bool) -> None:
@@ -795,10 +878,31 @@ class ScopePage(QWidget):
         self._update_controls()
 
     def set_sampling(self, active: bool, source_text: str = "") -> None:
+        previous = self._sampling
         self._sampling = bool(active)
         if not active:
-            self.actual_label.setText("Actual: -")
+            # Pause is an analysis state. Preserve the last measured acquisition
+            # rate instead of replacing it with '-', so the captured data keeps
+            # its sampling context while the user inspects it.
+            if self._latest_actual_hz > 0:
+                self.actual_label.setText(f"Actual: {self._latest_actual_hz:.4g} Hz (paused)")
         self._update_controls()
+
+        if previous == self._sampling:
+            return
+
+        if self._sampling:
+            if self._latest_actual_hz > 0:
+                self.actual_label.setText(f"Actual: {self._latest_actual_hz:.4g} Hz")
+            # Start begins a fresh acquisition session; _start() has already
+            # cleared the previous buffer. The first arriving samples perform
+            # the initial fit through _need_fit.
+        else:
+            # Pause is an analysis operation: stop acquisition and preserve the
+            # exact current X/Y window. Flush only the newest pending display
+            # state; never call View All / fit here.
+            if self._render_dirty:
+                QTimer.singleShot(0, self._render_if_dirty)
 
     def _update_controls(self) -> None:
         self.start_btn.setEnabled(self._connected and not self._sampling)
@@ -863,13 +967,109 @@ class ScopePage(QWidget):
         self._render_dirty = True
 
     def _render_if_dirty(self) -> None:
-        if not self._render_dirty:
+        if self._rebuilding_plots:
             return
-        self._render_dirty = False
-        if self._latest_actual_hz > 0:
-            self.actual_label.setText(f"Actual: {self._latest_actual_hz:.4g} Hz")
-        self._update_curves()
-        self._update_cursor_label()
+
+        # The timer is the sole GUI render clock. Acquisition can be bursty, but
+        # curve materialization and viewport animation are intentionally
+        # decoupled so a 60 FPS UI does not imply 60 expensive setData() calls.
+        data_dirty = bool(self._render_dirty)
+        if data_dirty:
+            self._render_dirty = False
+            self._curve_data_pending = True
+
+        now = time.perf_counter()
+
+        # Manual pan is interaction-priority mode.  Do *not* touch QTableWidget,
+        # hover/nearest-value lookup, curve data, or statistics text while the
+        # mouse is held.  HSS/RTT still appends raw samples in the background.
+        if self._user_dragging:
+            self._flush_pending_manual_x_sync(force=False)
+            self._render_frames += 1
+            return
+
+        if data_dirty and now - self._last_stats_refresh_at >= 1.0 / self.STATS_REFRESH_MAX_HZ:
+            self.channel_table.update_statistics(self._data.stats_snapshot())
+            self._last_stats_refresh_at = now
+            if self._latest_actual_hz > 0:
+                suffix = "" if self._sampling else " (paused)"
+                self.actual_label.setText(f"Actual: {self._latest_actual_hz:.4g} Hz{suffix}")
+
+        follow_moved = False
+        follow_enabled = self._sampling and self.follow_latest_check.isChecked() and self._data.has_data
+        if follow_enabled:
+            follow_moved = self._follow_latest(force=False, smooth=True)
+
+        redraw = bool(self._force_curve_redraw or self._view_dirty)
+        if self._curve_data_pending and not redraw:
+            if follow_enabled:
+                redraw = True
+            else:
+                redraw = self._new_data_affects_visible_window()
+
+        # Cap expensive curve rebuilds independently from the viewport/render
+        # FPS.  A 60 FPS Follow still moves smoothly, while the waveform samples
+        # are refreshed up to 30 times/s (or immediately for explicit zoom/
+        # display changes).  Keep the pending bit set when a frame is skipped.
+        explicit_redraw = bool(self._force_curve_redraw or self._view_dirty)
+        if redraw and not explicit_redraw and self._last_curve_refresh_at > 0.0:
+            if now - self._last_curve_refresh_at < 1.0 / self.CURVE_REFRESH_MAX_HZ:
+                redraw = False
+
+        if redraw:
+            self._update_curves(skip_follow=True)
+            self._update_cursor_label()
+            self._force_curve_redraw = False
+            self._view_dirty = False
+            self._curve_data_pending = False
+            self._last_curve_refresh_at = now
+            self._last_rendered_data_first_x = self._data.first_x
+            self._last_rendered_data_last_x = self._data.last_x
+        elif follow_moved:
+            self._refresh_hover_probe()
+
+        self._render_frames += 1
+
+    def _new_data_affects_visible_window(self) -> bool:
+        """Whether appended/trimmed raw data can change the fixed visible X slice.
+
+        With Follow disabled, a window such as 10..12 s is visually immutable
+        once acquisition has progressed past 12 s. Rebuilding the exact same
+        curve 30/60 times per second only steals GUI time from pan/zoom. We do
+        redraw while the newest data is still entering the window, and again if
+        rolling-buffer trimming reaches that historical window.
+        """
+        if not self._data.has_data:
+            return False
+        visible = self._current_visible_x_range()
+        if visible is None:
+            return True
+        _low, high = visible
+        prev_last = self._last_rendered_data_last_x
+        if prev_last is None or high >= float(prev_last) - 1e-12:
+            return True
+        prev_first = self._last_rendered_data_first_x
+        first = self._data.first_x
+        if first is not None and prev_first is not None:
+            # If the rolling buffer's left edge advances through (or completely
+            # past) this viewport, old displayed samples have expired and the
+            # fixed history window must be refreshed once, possibly to blank.
+            if float(first) > float(prev_first) + 1e-12 and float(prev_first) <= high:
+                return True
+        return False
+
+    def _flush_pending_manual_x_sync(self, force: bool = False) -> None:
+        pending = self._pending_shared_x_range
+        if pending is None or self.view_combo.currentText() != "Stacked":
+            return
+        now = time.perf_counter()
+        if not force and self._last_manual_x_sync_at > 0.0:
+            if now - self._last_manual_x_sync_at < 1.0 / self.MANUAL_STACKED_SYNC_HZ:
+                return
+        low, high, source_plot = pending
+        self._pending_shared_x_range = None
+        self._last_manual_x_sync_at = now
+        self._set_shared_x_range(float(low), float(high), source_plot=source_plot)
 
     def _update_period_label(self) -> None:
         hz = max(1, self.sample_hz_spin.value())
@@ -883,10 +1083,11 @@ class ScopePage(QWidget):
         self._data.set_seconds(float(seconds))
         self._update_curves()
         if self._sampling and self.follow_latest_check.isChecked():
-            self._follow_latest()
+            self._last_follow_right = None
+            self._follow_latest(force=True)
 
     def _export_data(self) -> None:
-        if self._data.x.size == 0:
+        if not self._data.has_data:
             self.log_requested.emit("Scope export: no buffered samples")
             return
         default_name = f"scope_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
@@ -902,17 +1103,14 @@ class ScopePage(QWidget):
                 writer = csv.writer(fp)
                 x_name = "Time(s)" if self._data.x_is_time else "Sample Index"
                 writer.writerow([x_name] + [names.get(cid, str(cid)) for cid in channel_ids])
-                arrays = [self._data.values.get(cid) for cid in channel_ids]
-                for i, x in enumerate(self._data.x):
+                # Stream chunked raw data directly to CSV. This avoids materializing
+                # one huge full-buffer array when the capture has run for a long time.
+                for x, values in self._data.iter_rows(channel_ids):
                     row = [f"{float(x):.12g}"]
-                    for arr in arrays:
-                        if arr is None or i >= arr.size or not math.isfinite(float(arr[i])):
-                            row.append("")
-                        else:
-                            row.append(f"{float(arr[i]):.12g}")
+                    row.extend("" if value is None else f"{float(value):.12g}" for value in values)
                     writer.writerow(row)
             self.log_requested.emit(
-                f"Scope export: {self._data.x.size} sample(s), {len(channel_ids)} channel(s) -> {path}"
+                f"Scope export: {self._data.sample_count} sample(s), {len(channel_ids)} channel(s) -> {path}"
             )
         except Exception as exc:
             self.log_requested.emit(f"Scope export ERROR: {exc}")
@@ -920,13 +1118,15 @@ class ScopePage(QWidget):
     def _start(self) -> None:
         try:
             specs = self.channel_table.specs() if self._source == "HSS" else []
-            if self._source == "HSS" and not any(s.enabled for s in specs):
-                raise ValueError("至少添加并显示一个 Scope 成员")
-            # Resume keeps the buffered capture for analysis.  Data is only
-            # cleared explicitly (right-click -> Clear buffered data), when the
-            # acquisition source changes, or when an incompatible RTT format appears.
-            self._need_fit = self._data.x.size == 0
+            if self._source == "HSS" and not specs:
+                raise ValueError("至少添加一个 Scope 成员")
+            # A Start begins a fresh acquisition session. Pause is the operation
+            # used to retain/analyse the current capture; pressing Start again
+            # intentionally clears the old raw buffer and statistics first.
+            self._clear_buffered_data(log_message=False)
+            self._need_fit = True
             self.start_requested.emit(self._source, specs, self.sample_hz_spin.value())
+            self.log_requested.emit("Scope: new acquisition session; previous buffered data cleared")
         except Exception as exc:
             self.log_requested.emit(f"SCOPE START ERROR: {exc}")
 
@@ -964,123 +1164,278 @@ class ScopePage(QWidget):
             self.log_requested.emit("RTT format has no t4 timestamp: X axis uses sample index, matching J-Scope semantics")
         self.log_requested.emit(
             f"RTT detected: {channel_name} | {len(channels)} value channel(s)"
-            + (" | resumed existing capture" if compatible_resume and self._data.x.size else "")
+            + (" | resumed existing capture" if compatible_resume and self._data.has_data else "")
         )
 
     def append_samples(self, times, values, actual_hz: float, x_is_time: bool) -> None:
         self._x_is_time = bool(x_is_time)
         self._data.append(times, values, x_is_time)
+        self._latest_data_arrival_at = time.perf_counter()
+        self._latest_data_x = self._data.last_x
         if actual_hz > 0:
             self._latest_actual_hz = float(actual_hz)
         # Do not redraw pyqtgraph for every acquisition chunk. The render timer
         # consumes only the newest state at the selected 1..60 FPS, while every
         # sample remains in ScopeDataStore and contributes to statistics/export.
         self._render_dirty = True
+        self._curve_data_pending = True
+
+    def _view_changed(self, _view: str) -> None:
+        # Rebuild the presentation graph once, then align the retained capture just
+        # like an explicit View All.  This makes Overlay <-> Stacked deterministic
+        # and prevents a previous mode's zoom from leaking into the new layout.
+        self._rebuild_plots()
+        if self._data.has_data:
+            self._align_full_buffer()
+
+    def _disconnect_plot_signals(self) -> None:
+        # Explicitly break every Python/Qt signal connection before scheduling old
+        # PlotWidgets for deletion.  Stacked mode creates many linked ViewBoxes;
+        # relying on deleteLater() alone can leave old linked plots alive until the
+        # event loop catches up, so repeated Stacked <-> Overlay switches used to
+        # accumulate callbacks and eventually freeze the GUI.
+        for signal, slot in self._plot_signal_connections:
+            try:
+                signal.disconnect(slot)
+            except Exception:
+                pass
+        self._plot_signal_connections = []
+        for proxy in self._mouse_proxies:
+            try:
+                disconnect = getattr(proxy, "disconnect", None)
+                if callable(disconnect):
+                    disconnect()
+            except Exception:
+                pass
+        self._mouse_proxies = []
 
     def _clear_plot_layout(self) -> None:
+        self._disconnect_plot_signals()
+
+        # Defensive cleanup for projects opened from older versions which may
+        # still have pyqtgraph XLink state. V0.3.10 itself no longer creates it.
+        for plot in list(self._plots):
+            try:
+                plot.setXLink(None)
+            except Exception:
+                try:
+                    plot.getPlotItem().vb.setXLink(None)
+                except Exception:
+                    pass
+            try:
+                plot.clear()
+            except Exception:
+                pass
+            try:
+                plot.hide()
+            except Exception:
+                pass
+
         while self.plot_layout.count():
             item = self.plot_layout.takeAt(0)
             widget = item.widget()
             if widget is not None:
+                try:
+                    widget.setParent(None)
+                    widget.close()
+                except Exception:
+                    pass
                 widget.deleteLater()
+
         self._plots = []
         self._curves = {}
+        self._curve_colors = {}
         self._plot_channel_ids = {}
-        self._hover_lines = []
-        self._mouse_proxies = []
+        self._hover_plot = None
+        self._hover_scene_pos = None
         self._x_lines = {"X1": [], "X2": []}
         self._y_lines = {"Y1": None, "Y2": None}
+        if hasattr(self, "hover_vline"):
+            self.hover_vline.hide()
         if hasattr(self, "hover_label"):
             self.hover_label.hide()
 
     def _rebuild_plots(self) -> None:
-        if not hasattr(self, "plot_layout"):
-            return
-        self._clear_plot_layout()
-        visible_ids = self.channel_table.visible_channel_ids()
-        names = self.channel_table.channel_names()
-        if not visible_ids:
-            empty = QLabel("没有显示的波形通道")
-            empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.plot_layout.addWidget(empty)
+        if not hasattr(self, "plot_layout") or self._rebuilding_plots:
             return
 
-        if self.view_combo.currentText() == "Overlay":
-            plot = self._new_plot(None)
-            self.plot_layout.addWidget(plot, 1)
-            self._plots.append(plot)
-            self._plot_channel_ids[id(plot)] = None
-            plot.addLegend(offset=(8, 8))
-            hues = max(1, len(visible_ids))
-            for i, cid in enumerate(visible_ids):
-                curve = plot.plot(name=names.get(cid, str(cid)), pen=pg.mkPen(pg.intColor(i, hues=hues), width=1.3))
-                self._curves[cid] = curve
-        else:
-            first = None
-            hues = max(1, len(visible_ids))
-            for i, cid in enumerate(visible_ids):
-                plot = self._new_plot(cid)
-                if first is None:
-                    first = plot
-                else:
-                    plot.setXLink(first)
-                plot.setLabel("left", names.get(cid, str(cid)))
-                curve = plot.plot(pen=pg.mkPen(pg.intColor(i, hues=hues), width=1.2))
-                self._curves[cid] = curve
-                self._plots.append(plot)
-                self._plot_channel_ids[id(plot)] = cid
+        # Plot reconstruction must not silently reset a retained capture to the
+        # new ViewBox default 0..1 range. Keep the user's current X window; a
+        # View-mode switch can explicitly request View All afterwards.
+        previous_x_range = self._current_visible_x_range() if self._plots else None
+        self._rebuilding_plots = True
+        timer_was_active = self._render_timer.isActive() if hasattr(self, "_render_timer") else False
+        if timer_was_active:
+            self._render_timer.stop()
+        self.plot_host.setUpdatesEnabled(False)
+        try:
+            self._clear_plot_layout()
+            all_ids = self.channel_table.ordered_channel_ids()
+            visible_set = set(self.channel_table.visible_channel_ids())
+            names = self.channel_table.channel_names()
+            if not all_ids:
+                empty = QLabel("没有 Scope 波形通道")
+                empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.plot_layout.addWidget(empty)
+            elif self.view_combo.currentText() == "Overlay":
+                plot = self._new_plot(None, track_x_range=True)
                 self.plot_layout.addWidget(plot, 1)
+                self._plots.append(plot)
+                self._plot_channel_ids[id(plot)] = None
+                plot.addLegend(offset=(8, 8))
+                for i, cid in enumerate(all_ids):
+                    color = QColor(self.channel_table.channel_color(cid))
+                    self._curve_colors[cid] = color
+                    # PlotCurveItem is lighter than PlotDataItem for pure
+                    # oscilloscope lines (no scatter/data-mapping machinery).
+                    curve = pg.PlotCurveItem(pen=pg.mkPen(color, width=1.2))
+                    plot.addItem(curve)
+                    try:
+                        plot.getPlotItem().legend.addItem(curve, names.get(cid, str(cid)))
+                    except Exception:
+                        pass
+                    curve.setVisible(cid in visible_set)
+                    self._curves[cid] = curve
+                self._update_overlay_selection_style()
+            else:
+                for i, cid in enumerate(all_ids):
+                    # Every Stacked plot owns an X-range listener, but there is no
+                    # pyqtgraph XLink. Manual pan/zoom is propagated once by our
+                    # guarded synchronizer; live-follow uses the same path. This
+                    # avoids linked-ViewBox callback cascades with 3+ channels.
+                    plot = self._new_plot(cid, track_x_range=True)
+                    plot.setLabel("left", names.get(cid, str(cid)))
+                    color = QColor(self.channel_table.channel_color(cid))
+                    self._curve_colors[cid] = color
+                    curve = pg.PlotCurveItem(pen=pg.mkPen(color, width=1.2))
+                    plot.addItem(curve)
+                    self._curves[cid] = curve
+                    self._plots.append(plot)
+                    self._plot_channel_ids[id(plot)] = cid
+                    self.plot_layout.addWidget(plot, 1)
+                    plot.setVisible(cid in visible_set)
 
-        self._install_cursor_lines()
-        self._update_curves()
-        self._update_axis_labels()
+            self._install_cursor_lines()
+            self._update_axis_labels()
+            # Repaint exactly once after the new display graph is complete. Data
+            # acquisition may continue in the worker while this GUI rebuild runs.
+            self._render_dirty = True
+        finally:
+            self.plot_host.setUpdatesEnabled(True)
+            self.plot_host.update()
+            self._rebuilding_plots = False
+            if timer_was_active:
+                self._render_timer.start()
 
-    def _new_plot(self, channel_id: int | None) -> pg.PlotWidget:
+        # Restore the previous X window before materializing the new curves.
+        # Without this ordering, the fresh pyqtgraph ViewBox is 0..1, so the
+        # first curve build contains only 0..1 s; later fitting the axis wider
+        # leaves the curve data itself truncated until another refresh arrives.
+        if previous_x_range is not None and self._data.has_data:
+            try:
+                self._set_shared_x_range(float(previous_x_range[0]), float(previous_x_range[1]))
+            except Exception:
+                pass
+        self._view_dirty = True
+        self._force_curve_redraw = True
+        self._render_dirty = True
+        self._curve_data_pending = True
+        self._interaction_cache_active = False
+        self._interaction_cache_range = None
+        # Populate the new curves once immediately. Subsequent updates return to
+        # the configured FPS timer.
+        self._render_if_dirty()
+
+    def _remember_connection(self, signal, slot) -> None:
+        signal.connect(slot)
+        self._plot_signal_connections.append((signal, slot))
+
+    def _new_plot(self, channel_id: int | None, track_x_range: bool = False) -> pg.PlotWidget:
         plot = ScopePlotWidget()
         plot.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         plot.showGrid(x=True, y=True, alpha=0.25)
         plot.setMouseEnabled(x=True, y=True)
         plot_item = plot.getPlotItem()
         plot_item.setClipToView(True)
-        plot_item.setDownsampling(auto=True, mode="peak")
-        # Disable pyqtgraph's built-in right-click menu (View All / X axis / Export...).
-        # Scope owns right click exclusively for X1/X2/Y1/Y2 cursor operations.
+        # ScopeDataStore already performs phase-stable display decimation.  Do
+        # not ask pyqtgraph to auto-downsample the same data a second time; the
+        # auto factor changes as the ViewBox scrolls and can make the waveform
+        # appear to "breathe" or move back and forth.
+        plot_item.setDownsampling(ds=1, auto=False, mode="peak")
         if hasattr(plot_item, "setMenuEnabled"):
             plot_item.setMenuEnabled(False)
-        # Hide pyqtgraph's built-in "A" auto-range button.  Live scrolling is
-        # controlled exclusively by the toolbar checkbox and only moves X.
         if hasattr(plot_item, "hideButtons"):
             plot_item.hideButtons()
         vb = plot_item.vb
         if hasattr(vb, "setMenuEnabled"):
             vb.setMenuEnabled(False)
-        # Never leave pyqtgraph automatic X/Y ranging enabled while samples arrive.
-        # The user's Y scale/baseline remains stable until an explicit view operation.
         if hasattr(vb, "disableAutoRange"):
             vb.disableAutoRange()
-        # Track manual X zoom even while live-follow is enabled.  Programmatic
-        # follow moves are guarded so they do not overwrite the saved span.
-        if hasattr(vb, "sigXRangeChanged"):
-            vb.sigXRangeChanged.connect(lambda _vb, rng, p=plot: self._x_range_changed(p, rng))
-        plot.command_requested.connect(lambda command, p=plot: self._plot_key_command(command, p))
-        plot.mouse_left.connect(self._hide_hover)
-        plot.scene().sigMouseClicked.connect(lambda ev, p=plot, cid=channel_id: self._plot_clicked(ev, p, cid))
-        hover_line = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen((190, 190, 190, 170), width=1))
-        hover_line.hide()
-        plot.addItem(hover_line, ignoreBounds=True)
-        self._hover_lines.append(hover_line)
+
+        if track_x_range and hasattr(vb, "sigXRangeChanged"):
+            range_slot = lambda _vb, rng, p=plot: self._x_range_changed(p, rng)
+            self._remember_connection(vb.sigXRangeChanged, range_slot)
+
+        command_slot = lambda command, p=plot: self._plot_key_command(command, p)
+        self._remember_connection(plot.command_requested, command_slot)
+        self._remember_connection(plot.mouse_left, self._hide_hover)
+        self._remember_connection(plot.left_drag_started, self._manual_plot_drag_started)
+        self._remember_connection(plot.left_drag_finished, self._manual_plot_drag_finished)
+
+        scene = plot.scene()
+        click_slot = lambda ev, p=plot, cid=channel_id: self._plot_clicked(ev, p, cid)
+        self._remember_connection(scene.sigMouseClicked, click_slot)
+
         proxy = pg.SignalProxy(
-            plot.scene().sigMouseMoved,
+            scene.sigMouseMoved,
             rateLimit=60,
             slot=lambda args, p=plot, cid=channel_id: self._mouse_moved(args[0], p, cid),
         )
         self._mouse_proxies.append(proxy)
         return plot
 
-    def _plot_key_command(self, command: str, plot: pg.PlotWidget) -> None:
-        channel_id = self._plot_channel_ids.get(id(plot))
-        if channel_id is None:
-            channel_id = self.channel_table.selected_channel_id()
+    def _table_key_command(self, command: str) -> None:
+        # J-Scope-style shortcuts work immediately after selecting a row; the
+        # plot does not need an extra click to steal keyboard focus.
+        self._apply_channel_key_command(command, self.channel_table.selected_channel_id())
+
+    def _channel_visibility_changed(self, channel_id) -> None:
+        """Show/Hide is presentation-only and never rebuilds/clears capture data."""
+        cid = int(channel_id) if channel_id is not None else None
+        if cid is None:
+            return
+        visible = cid in set(self.channel_table.visible_channel_ids())
+        if self.view_combo.currentText() == "Overlay":
+            curve = self._curves.get(cid)
+            if curve is not None:
+                curve.setVisible(visible)
+        else:
+            for plot in self._plots:
+                if self._plot_channel_ids.get(id(plot)) == cid:
+                    plot.setVisible(visible)
+                    break
+        self._update_overlay_selection_style()
+        self._force_curve_redraw = True
+        self._render_dirty = True
+        self._refresh_hover_probe()
+
+    def _channel_color_changed(self, channel_id) -> None:
+        cid = int(channel_id) if channel_id is not None else None
+        if cid is None:
+            return
+        color = QColor(self.channel_table.channel_color(cid))
+        self._curve_colors[cid] = color
+        self._update_overlay_selection_style()
+        curve = self._curves.get(cid)
+        if curve is not None and self.view_combo.currentText() != "Overlay":
+            try:
+                curve.setPen(pg.mkPen(color, width=1.2))
+            except Exception:
+                pass
+        self._force_curve_redraw = True
+        self._render_dirty = True
+
+    def _apply_channel_key_command(self, command: str, channel_id: int | None) -> None:
         if channel_id is None:
             return
         self.channel_table.select_channel_id(channel_id)
@@ -1100,16 +1455,44 @@ class ScopePage(QWidget):
                 step = max(1.0, abs(float(current) * gain)) * 0.10
             else:
                 step = 1.0
-            new_offset = offset + step if command == "offset_up" else offset - step
-            self.channel_table.set_gain_offset(channel_id, offset=new_offset)
+            self.channel_table.set_gain_offset(
+                channel_id, offset=offset + step if command == "offset_up" else offset - step
+            )
+
+    def _plot_key_command(self, command: str, plot: pg.PlotWidget) -> None:
+        channel_id = self._plot_channel_ids.get(id(plot))
+        if channel_id is None:
+            channel_id = self.channel_table.selected_channel_id()
+        self._apply_channel_key_command(command, channel_id)
 
     def _display_transform_changed(self, channel_id) -> None:
-        # Gain/Offset changes only the rendered curve; raw buffer/statistics stay intact.
-        self._update_curves()
-        if self._hover_x is not None:
-            self._update_hover_tooltip(self._hover_x)
+        # Gain/Offset changes the visible curve even when Follow is off and no
+        # new raw sample falls inside the current historical window.
+        self._force_curve_redraw = True
+        self._render_dirty = True
+        self._refresh_hover_probe()
+
+    def _update_overlay_selection_style(self) -> None:
+        """Draw the selected Overlay channel last / on top.
+
+        Selection is an analysis operation, not a data transform.  The chosen
+        channel gets a higher Z value and a slightly thicker pen while all raw
+        values, Gain/Offset and exports remain unchanged.
+        """
+        if self.view_combo.currentText() != "Overlay":
+            return
+        selected = self.channel_table.selected_channel_id()
+        for order, (cid, curve) in enumerate(self._curves.items()):
+            color = self._curve_colors.get(cid, QColor(self.channel_table.channel_color(cid)))
+            is_selected = selected is not None and int(cid) == int(selected)
+            try:
+                curve.setZValue(1000 if is_selected else order)
+                curve.setPen(pg.mkPen(color, width=2.4 if is_selected else 1.1))
+            except Exception:
+                pass
 
     def _selected_channel_changed(self, channel_id) -> None:
+        self._update_overlay_selection_style()
         # In Stacked view, Y1/Y2 belong to the selected channel plot. Recreate
         # only those horizontal cursor lines instead of rebuilding every plot.
         if self.view_combo.currentText() == "Stacked":
@@ -1128,7 +1511,7 @@ class ScopePage(QWidget):
         self._update_cursor_label()
 
     def _mouse_moved(self, scene_pos, plot: pg.PlotWidget, channel_id: int | None) -> None:
-        if not self._data.x.size:
+        if not self._data.has_data:
             self._hide_hover()
             return
         vb = plot.getPlotItem().vb
@@ -1137,26 +1520,55 @@ class ScopePage(QWidget):
                 return
             point = vb.mapSceneToView(scene_pos)
             x_value = float(point.x())
-        except Exception:
-            return
-        self._hover_x = x_value
-        for line in self._hover_lines:
-            line.setValue(x_value)
-            line.show()
-        self._update_hover_tooltip(x_value)
-
-        # Keep the floating readout close to the mouse but inside the plot host.
-        try:
             local_plot = plot.mapFromScene(scene_pos)
             local_host = plot.mapTo(self.plot_host, local_plot)
+        except Exception:
+            return
+
+        self._hover_plot = plot
+        self._hover_scene_pos = scene_pos
+        self._hover_x = x_value
+        self._show_hover_at_host_pos(int(local_host.x()), int(local_host.y()), x_value)
+
+    def _show_hover_at_host_pos(self, host_x: int, host_y: int, x_value: float) -> None:
+        # Pixel-space line: it follows the mouse rather than a data X coordinate,
+        # so live scrolling cannot leave old InfiniteLine paint artifacts behind.
+        x_line = min(max(0, int(host_x)), max(0, self.plot_host.width() - 1))
+        self.hover_vline.setGeometry(x_line, 0, 1, max(1, self.plot_host.height()))
+        self.hover_vline.raise_()
+        self.hover_vline.show()
+
+        self._update_hover_tooltip(x_value)
+        try:
             self.hover_label.adjustSize()
-            x = min(max(4, local_host.x() + 14), max(4, self.plot_host.width() - self.hover_label.width() - 4))
-            y = min(max(4, local_host.y() + 14), max(4, self.plot_host.height() - self.hover_label.height() - 4))
+            x = min(max(4, x_line + 14), max(4, self.plot_host.width() - self.hover_label.width() - 4))
+            y = min(max(4, int(host_y) + 14), max(4, self.plot_host.height() - self.hover_label.height() - 4))
             self.hover_label.move(x, y)
             self.hover_label.raise_()
             self.hover_label.show()
         except Exception:
             pass
+
+    def _refresh_hover_probe(self) -> None:
+        """Refresh the sample under a stationary mouse after the X window scrolls."""
+        plot = self._hover_plot
+        scene_pos = self._hover_scene_pos
+        if plot is None or scene_pos is None or not self._data.has_data:
+            return
+        try:
+            vb = plot.getPlotItem().vb
+            if not vb.sceneBoundingRect().contains(scene_pos):
+                self._hide_hover()
+                return
+            point = vb.mapSceneToView(scene_pos)
+            x_value = float(point.x())
+            local_plot = plot.mapFromScene(scene_pos)
+            local_host = plot.mapTo(self.plot_host, local_plot)
+        except Exception:
+            self._hide_hover()
+            return
+        self._hover_x = x_value
+        self._show_hover_at_host_pos(int(local_host.x()), int(local_host.y()), x_value)
 
     def _update_hover_tooltip(self, x_value: float) -> None:
         names = self.channel_table.channel_names()
@@ -1183,13 +1595,22 @@ class ScopePage(QWidget):
 
     def _hide_hover(self) -> None:
         self._hover_x = None
-        for line in self._hover_lines:
-            line.hide()
+        self._hover_plot = None
+        self._hover_scene_pos = None
+        if hasattr(self, "hover_vline"):
+            self.hover_vline.hide()
         if hasattr(self, "hover_label"):
             self.hover_label.hide()
 
-    def _clear_buffered_data(self) -> None:
+    def _clear_buffered_data(self, log_message: bool = True) -> None:
         self._data.clear()
+        self._last_rendered_data_first_x = None
+        self._last_rendered_data_last_x = None
+        self._view_dirty = True
+        self._force_curve_redraw = True
+        self._curve_data_pending = False
+        self._interaction_cache_active = False
+        self._interaction_cache_range = None
         self.channel_table.update_statistics({})
         for curve in self._curves.values():
             curve.setData([], [])
@@ -1198,7 +1619,8 @@ class ScopePage(QWidget):
         self._need_fit = True
         self.actual_label.setText("Actual: -")
         self._update_cursor_label()
-        self.log_requested.emit("Scope: buffered data and statistics cleared")
+        if log_message:
+            self.log_requested.emit("Scope: buffered data and statistics cleared")
 
     def _update_axis_labels(self) -> None:
         label = "Time" if self._x_is_time else "Sample Index"
@@ -1206,41 +1628,225 @@ class ScopePage(QWidget):
         for plot in self._plots:
             plot.setLabel("bottom", label, units=units)
 
-    def _update_curves(self) -> None:
-        for cid, curve in self._curves.items():
-            x, y = self._data.curve(cid)
-            gain, offset = self.channel_table.gain_offset(cid)
-            curve.setData(x, y * gain + offset)
-        self.channel_table.update_statistics(self._data.stats_snapshot())
-        self._update_axis_labels()
-        if self._need_fit and self._data.x.size:
-            # First samples: fit Y once, but do not let the tiny initial data
-            # width become the live-follow X span. Follow starts with the user
-            # configured buffer width and remains manually adjustable afterward.
+    def _display_point_limit(self) -> int:
+        # Render roughly two points per horizontal pixel.  This is enough to
+        # preserve waveform shape while avoiding a fixed 10k points * channel *
+        # FPS cost on small plot areas.  ScopeDataStore keeps the complete raw
+        # buffer; this limit affects drawing only.
+        if not self._plots:
+            return 2000
+        try:
+            width = max(320, int(self._plots[0].viewport().width()))
+        except Exception:
+            width = 1000
+        return max(800, min(12000, width * 2))
+
+    def _current_visible_x_range(self) -> tuple[float, float] | None:
+        """Return the X window currently visible to the user.
+
+        Rendering only this window is a major performance rule. A 30 s raw
+        buffer must not force every 0.5 s zoomed view to rebuild/decimate all
+        30 s worth of samples on every frame.
+        """
+        if not self._plots:
+            return None
+        try:
+            low, high = self._plots[0].getPlotItem().vb.viewRange()[0]
+            low = float(low)
+            high = float(high)
+            if math.isfinite(low) and math.isfinite(high) and high > low:
+                return low, high
+        except Exception:
+            pass
+        return self._full_buffer_x_range()
+
+    def _update_curves(self, skip_follow: bool = False) -> None:
+        # Move/fit the viewport *before* selecting display points. Older builds
+        # generated curve data for the old X window and then moved the ViewBox,
+        # so the frame briefly displayed the wrong slice and looked as if the
+        # waveform jumped or lost points.
+        follow_moved = False
+        if self._need_fit and self._data.has_data:
             self._fit_all(capture_follow_span=False)
             self._need_fit = False
             if self.follow_latest_check.isChecked():
-                self._follow_x_span = float(self._data.seconds) if self._x_is_time else max(1.0, float(self._data.x.size))
-                self._follow_latest()
-        elif self._sampling and self.follow_latest_check.isChecked() and self._data.x.size:
-            self._follow_latest()
+                self._follow_x_span = float(self._data.seconds) if self._x_is_time else max(1.0, float(self._data.sample_count))
+                follow_moved = self._follow_latest(force=True, smooth=False)
+        elif (not skip_follow) and self._sampling and self.follow_latest_check.isChecked() and self._data.has_data:
+            follow_moved = self._follow_latest(force=False, smooth=True)
+
+        display_limit = self._display_point_limit()
+        visible_x = self._current_visible_x_range()
+        for cid, curve in self._curves.items():
+            x, y = self._data.curve(cid, display_limit=display_limit, x_range=visible_x)
+            gain, offset = self.channel_table.gain_offset(cid)
+            if abs(gain - 1.0) <= 1e-15 and abs(offset) <= 1e-15:
+                display_y = y
+            else:
+                display_y = y * gain + offset
+            curve.setData(x, display_y)
+
+        # Table statistics are useful but need not repaint at 60 FPS. The raw
+        # statistics are updated for every acquired sample in ScopeDataStore; this
+        # merely limits the expensive QTableWidget text refresh to 10 Hz.
+        now = time.perf_counter()
+        if now - self._last_stats_refresh_at >= 1.0 / self.STATS_REFRESH_MAX_HZ:
+            self.channel_table.update_statistics(self._data.stats_snapshot())
+            self._last_stats_refresh_at = now
+
+        # A stationary mouse only needs a new time/value readout when the X
+        # viewport itself moved. Ordinary curve redraws do not change the sample
+        # underneath the cursor.
+        if follow_moved:
+            self._refresh_hover_probe()
+
+    @staticmethod
+    def _ranges_close(current, low: float, high: float) -> bool:
+        try:
+            c0, c1 = float(current[0]), float(current[1])
+        except Exception:
+            return False
+        scale = max(1.0, abs(low), abs(high), abs(high - low))
+        tol = scale * 1e-10
+        return abs(c0 - low) <= tol and abs(c1 - high) <= tol
+
+    def _set_shared_x_range(self, low: float, high: float, source_plot: pg.PlotWidget | None = None) -> None:
+        """Apply one X range to the active plots without pyqtgraph XLink.
+
+        In Overlay there is only one plot. In Stacked mode each ViewBox is
+        independent; this routine performs a one-way guarded synchronization.
+        Signals emitted by follower ViewBoxes return immediately because
+        ``_syncing_x_range`` is set, so there is no reciprocal update chain.
+        """
+        if not self._plots or not (math.isfinite(low) and math.isfinite(high)) or high <= low:
+            return
+        targets = self._plots if self.view_combo.currentText() == "Stacked" else self._plots[:1]
+        self._syncing_x_range = True
+        batch_repaint = len(targets) > 1
+        if batch_repaint:
+            self.plot_host.setUpdatesEnabled(False)
+        try:
+            for plot in targets:
+                if source_plot is not None and plot is source_plot:
+                    continue
+                try:
+                    vb = plot.getPlotItem().vb
+                    current = vb.viewRange()[0]
+                    if self._ranges_close(current, low, high):
+                        continue
+                    plot.setXRange(low, high, padding=0)
+                except Exception:
+                    continue
+        finally:
+            if batch_repaint:
+                self.plot_host.setUpdatesEnabled(True)
+                self.plot_host.update()
+            self._syncing_x_range = False
+
+    def _interaction_display_point_limit(self) -> int:
+        """Small but visually stable full-buffer cache used only while panning."""
+        if not self._plots:
+            return 1800
+        try:
+            width = max(320, int(self._plots[0].viewport().width()))
+        except Exception:
+            width = 1000
+        # Roughly 1.5 points/pixel for the *whole retained buffer*.  This keeps
+        # ViewBox transforms light even for 60/120 s captures and several lanes.
+        return max(700, min(5000, int(width * 1.5)))
+
+    def _prepare_interaction_cache(self) -> None:
+        """Materialize a lightweight full-buffer snapshot before mouse pan.
+
+        The cache deliberately covers the complete retained history so the user
+        can drag anywhere inside the current Buffer without forcing a new
+        ScopeDataStore.curve()/downsample()/setData() cycle mid-gesture.  Exact
+        viewport detail is restored once the button is released.
+        """
+        if not self._data.has_data or not self._curves:
+            self._interaction_cache_active = False
+            self._interaction_cache_range = None
+            return
+        x_range = self._full_buffer_x_range()
+        if x_range is None:
+            return
+        limit = self._interaction_display_point_limit()
+        # One batched repaint for all channels rather than one repaint per curve.
+        self.plot_host.setUpdatesEnabled(False)
+        try:
+            for cid, curve in self._curves.items():
+                x, y = self._data.curve(cid, display_limit=limit, x_range=x_range)
+                gain, offset = self.channel_table.gain_offset(cid)
+                if abs(gain - 1.0) <= 1e-15 and abs(offset) <= 1e-15:
+                    display_y = y
+                else:
+                    display_y = y * gain + offset
+                curve.setData(x, display_y)
+        finally:
+            self.plot_host.setUpdatesEnabled(True)
+            self.plot_host.update()
+        self._interaction_cache_active = True
+        self._interaction_cache_range = x_range
+        self._curve_data_pending = False
+        self._force_curve_redraw = False
+        self._view_dirty = False
+        self._last_curve_refresh_at = time.perf_counter()
+
+    def _manual_plot_drag_started(self) -> None:
+        # Disable Follow first, then freeze a lightweight full-history snapshot.
+        # After this one preparation step the drag path does no curve setData(),
+        # no table updates and no hover lookup; pyqtgraph only moves ViewBoxes.
+        if self.follow_latest_check.isChecked():
+            self.follow_latest_check.setChecked(False)
+            self.log_requested.emit("Scope: live follow disabled by left-button drag")
+        self._hide_hover()
+        self._prepare_interaction_cache()
+        self._user_dragging = True
+
+    def _manual_plot_drag_finished(self) -> None:
+        self._user_dragging = False
+        self._flush_pending_manual_x_sync(force=True)
+        self._interaction_cache_active = False
+        self._interaction_cache_range = None
+        # Restore exact high-detail samples only once, for the final viewport.
+        self._view_dirty = True
+        self._force_curve_redraw = True
+        self._render_dirty = True
+        self._curve_data_pending = True
 
     def _x_range_changed(self, plot: pg.PlotWidget, x_range) -> None:
-        """Remember the user's current X zoom span for live-follow.
+        """Remember manual X zoom and synchronize Stacked plots once.
 
-        A follow update itself also emits sigXRangeChanged, so those events are
-        ignored.  Any mouse/axis/manual zoom is therefore allowed while the
-        checkbox remains enabled; the next sample keeps that new span.
+        Programmatic follow/fit ranges and follower updates are ignored via the
+        two guards. A genuine user pan/zoom becomes authoritative and is copied
+        to the other Stacked plots without any ViewBox XLink relationship.
         """
-        if self._applying_follow_range:
+        if self._applying_follow_range or self._syncing_x_range or self._rebuilding_plots:
             return
         try:
             low, high = float(x_range[0]), float(x_range[1])
         except Exception:
             return
         span = high - low
-        if math.isfinite(span) and span > 1e-12:
-            self._follow_x_span = span
+        if not (math.isfinite(span) and span > 1e-12):
+            return
+        self._follow_x_span = span
+        self._last_follow_span = None
+        # During a drag the interaction cache already contains the retained
+        # history.  Do not mark the curves dirty on every mouse pixel; doing so
+        # would immediately defeat the cache and recreate the old stutter.
+        if not self._user_dragging:
+            self._view_dirty = True
+            self._render_dirty = True
+        if self.view_combo.currentText() == "Stacked":
+            if self._user_dragging:
+                # Do not synchronously fan every mouse-move range event into all
+                # follower ViewBoxes. The render clock copies at most ~30 Hz and
+                # release forces the final exact range, which feels much lighter.
+                self._pending_shared_x_range = (low, high, plot)
+                self._flush_pending_manual_x_sync(force=False)
+            else:
+                self._set_shared_x_range(low, high, source_plot=plot)
 
     def _current_x_span(self) -> float | None:
         if self._follow_x_span is not None and math.isfinite(self._follow_x_span) and self._follow_x_span > 1e-12:
@@ -1253,8 +1859,8 @@ class ScopePage(QWidget):
                     return span
             except Exception:
                 pass
-        if self._data.x.size >= 2:
-            span = float(self._data.x[-1]) - float(self._data.x[0])
+        if self._data.sample_count >= 2 and self._data.first_x is not None and self._data.last_x is not None:
+            span = float(self._data.last_x) - float(self._data.first_x)
             if math.isfinite(span) and span > 1e-12:
                 return span
         return float(self._data.seconds) if self._x_is_time else 1.0
@@ -1262,44 +1868,97 @@ class ScopePage(QWidget):
     def _follow_latest_toggled(self, checked: bool) -> None:
         # Single source of truth for live scrolling. Enabling it captures the
         # current user-visible X width; it does not fit/reset X or Y.
+        self._last_follow_right = None
+        self._last_follow_span = None
+        self._last_follow_scroll_at = 0.0
         if checked:
             self._follow_x_span = self._current_x_span()
-            if self._data.x.size:
-                self._follow_latest()
+            if self._data.has_data:
+                self._follow_latest(force=True)
 
-    def _follow_latest(self) -> None:
-        if not self._plots or self._data.x.size == 0:
-            return
-        last_x = float(self._data.x[-1])
+    def _follow_scroll_hz(self) -> float:
+        """Return an adaptive X-scroll rate independent of acquisition Hz.
+
+        Overlay has one ViewBox, so it can follow up to the selected GUI FPS.
+        Stacked must update every visible ViewBox; keep the total range-write
+        budget bounded so adding channels does not multiply GUI work without
+        limit. Example: 60 FPS + 3 Stacked channels -> min(60, 90/3)=30 Hz.
+        """
+        fps = float(self._fps_value())
+        if self.view_combo.currentText() != "Stacked":
+            return max(1.0, min(60.0, fps))
+        plot_count = max(1, len(self._plots))
+        budget_rate = self.FOLLOW_STACKED_VIEWBOX_BUDGET_HZ / float(plot_count)
+        return max(1.0, min(fps, budget_rate))
+
+    def _follow_latest(self, force: bool = False, smooth: bool = True) -> bool:
+        """Scroll the X viewport toward the newest sample.
+
+        Follow scrolling is intentionally slower than curve FPS. Updating three
+        or more independent Stacked ViewBoxes at the full GUI FPS can be much
+        more expensive than drawing the curves themselves on Windows/Qt. The
+        scroll rate is therefore adaptive: Overlay follows up to GUI FPS, while
+        Stacked shares a bounded ViewBox-update budget across visible channels.
+        This keeps motion substantially smoother than V0.3.11's fixed 12 Hz
+        without returning to the old unbounded range-update load.
+        """
+        if not self._plots or not self._data.has_data or self._data.last_x is None:
+            return False
+
+        now = time.perf_counter()
+        if not force and self._last_follow_scroll_at > 0.0:
+            follow_hz = self._follow_scroll_hz()
+            if now - self._last_follow_scroll_at < 1.0 / follow_hz:
+                return False
+
+        last_x = float(self._data.last_x)
+        # Interpolate the visual right edge between bursty worker deliveries.
+        # The actual curve still ends at the newest real sample; only the ViewBox
+        # translation is predicted a few milliseconds ahead, capped tightly so
+        # the display never runs noticeably in front of acquisition.
+        visual_right = last_x
+        if smooth and self._x_is_time and self._sampling and self._latest_data_arrival_at > 0.0:
+            elapsed = max(0.0, now - self._latest_data_arrival_at)
+            hz = self._latest_actual_hz if self._latest_actual_hz > 1.0 else float(self.sample_hz_spin.value())
+            one_sample = 1.0 / max(1.0, hz)
+            lead_cap = max(2.0 * one_sample, min(0.040, 2.0 / max(1.0, float(self._fps_value()))))
+            visual_right = last_x + min(elapsed, lead_cap)
+
         span = self._current_x_span()
         if span is None or not math.isfinite(span) or span <= 1e-12:
             span = float(self._data.seconds) if self._x_is_time else 1.0
 
-        # Preserve every plot's Y range exactly.  This makes live-follow a pure
-        # X translation even with linked ViewBoxes or pyqtgraph internals.
-        y_ranges = []
-        for plot in self._plots:
-            try:
-                yr = plot.getPlotItem().vb.viewRange()[1]
-                y_ranges.append((float(yr[0]), float(yr[1])))
-            except Exception:
-                y_ranges.append(None)
+        # Also skip sub-pixel movements. The time throttle above prevents event
+        # storms; this pixel threshold avoids range writes that cannot alter a
+        # single visible screen column.
+        try:
+            width_px = max(1, int(self._plots[0].viewport().width()))
+        except Exception:
+            width_px = 1000
+        min_visible_delta = max(span / width_px * 0.75, 1e-12)
+        span_changed = self._last_follow_span is None or abs(span - self._last_follow_span) > max(1e-12, span * 1e-6)
+        if (
+            not force
+            and not span_changed
+            and self._last_follow_right is not None
+            and abs(visual_right - self._last_follow_right) < min_visible_delta
+        ):
+            return False
 
-        left = last_x - span
-        right = last_x
+        left = visual_right - span
+        right = visual_right
         if right <= left:
             right = left + (1e-6 if self._x_is_time else 1.0)
 
         self._applying_follow_range = True
         try:
-            # Stacked plots share X via setXLink(); update only the master plot to
-            # avoid N-way linked range notifications on every render frame.
-            self._plots[0].setXRange(left, right, padding=0)
-            for plot, yr in zip(self._plots, y_ranges):
-                if yr is not None:
-                    plot.getPlotItem().vb.setYRange(yr[0], yr[1], padding=0)
+            self._set_shared_x_range(left, right)
+            self._last_follow_right = right
+            self._last_follow_span = span
+            self._last_follow_scroll_at = now
         finally:
             self._applying_follow_range = False
+        return True
 
     @staticmethod
     def _padded_y_range(y_min: float, y_max: float) -> tuple[float, float]:
@@ -1328,10 +1987,10 @@ class ScopePage(QWidget):
         the newest 30 s; before it is full, it is all captured data so there is
         no artificial empty area.
         """
-        if self._data.x.size == 0:
+        if not self._data.has_data or self._data.first_x is None or self._data.last_x is None:
             return None
-        left = float(self._data.x[0])
-        right = float(self._data.x[-1])
+        left = float(self._data.first_x)
+        right = float(self._data.last_x)
         if not (math.isfinite(left) and math.isfinite(right)):
             return None
         if right <= left:
@@ -1340,14 +1999,10 @@ class ScopePage(QWidget):
         return left, right
 
     def _channel_display_extrema(self, channel_id: int) -> tuple[float, float] | None:
-        raw = self._data.values.get(int(channel_id))
-        if raw is None or raw.size == 0:
+        extrema = self._data.buffer_extrema(int(channel_id))
+        if extrema is None:
             return None
-        finite = raw[np.isfinite(raw)]
-        if finite.size == 0:
-            return None
-        raw_min = float(np.min(finite))
-        raw_max = float(np.max(finite))
+        raw_min, raw_max = extrema
         gain, offset = self.channel_table.gain_offset(int(channel_id))
         a = raw_min * float(gain) + float(offset)
         b = raw_max * float(gain) + float(offset)
@@ -1389,15 +2044,13 @@ class ScopePage(QWidget):
 
         self._applying_follow_range = True
         try:
-            # In Stacked mode every plot is X-linked to the first plot. Setting
-            # XRange on every linked ViewBox causes a storm of reciprocal range
-            # notifications and can freeze the GUI when many channels exist.
-            # Set the shared X range exactly once on the master plot.
+            # Keep every Stacked ViewBox independent. Fit the shared X range via
+            # our guarded synchronizer rather than pyqtgraph XLink.
             for plot in self._plots:
                 vb = plot.getPlotItem().vb
                 if hasattr(vb, "disableAutoRange"):
                     vb.disableAutoRange()
-            self._plots[0].setXRange(x_left, x_right, padding=0)
+            self._set_shared_x_range(x_left, x_right)
 
             if mode == "overlay":
                 if overlay_y is not None:
@@ -1417,15 +2070,25 @@ class ScopePage(QWidget):
             span = x_right - x_left
             if math.isfinite(span) and span > 1e-12:
                 self._follow_x_span = span
+        # A one-shot fit is now authoritative; the next live-follow frame starts
+        # from this exact aligned state rather than an older cached right edge.
+        self._last_follow_right = x_right
+        self._last_follow_span = x_right - x_left
+
+    def _align_full_buffer(self) -> None:
+        # Fit the ViewBox first, then rebuild display samples for that new X
+        # range. Doing it in the opposite order produced the characteristic
+        # "axis is 0..6 s but waveform only exists in 0..1 s" bug after a View
+        # switch/rebuild.
+        self._fit_all(capture_follow_span=True)
+        self._view_dirty = True
+        self._force_curve_redraw = True
+        self._render_dirty = True
+        self._render_if_dirty()
+        self._refresh_hover_probe()
 
     def view_all(self) -> None:
-        # Explicit user action: first paint any pending raw data immediately,
-        # then fit the entire retained buffer. It does not change the follow
-        # checkbox. If follow is enabled, the complete buffered width becomes
-        # the new rolling X span on subsequent samples.
-        if self._render_dirty:
-            self._render_if_dirty()
-        self._fit_all(capture_follow_span=True)
+        self._align_full_buffer()
 
     # ---------- Cursor logic ----------
     def _install_cursor_lines(self) -> None:

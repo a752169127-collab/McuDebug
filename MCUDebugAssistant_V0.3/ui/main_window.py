@@ -59,8 +59,11 @@ class MainWindow(QMainWindow):
 
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("MCU Debug Assistant V0.3.7 - Scope HSS / RTT")
+        self.setWindowTitle("MCU Debug Assistant V0.3.16 - Scope HSS / RTT")
         self.resize(1220, 820)
+        # Keep the window genuinely user-resizable. Scope controls are wrapped
+        # into two rows in V0.3.13 so this smaller minimum width is practical.
+        self.setMinimumSize(760, 560)
 
         self._settings = QSettings("MCUDebugAssistant", "V0.2")
         self._legacy_settings = QSettings("MCUDebugAssistant", "V0.1")
