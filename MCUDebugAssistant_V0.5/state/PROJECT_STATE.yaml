@@ -1,0 +1,57 @@
+project: MCU Debug Assistant
+state_schema: 1
+current_version: V0.5.4
+version_status: "VERIFIED_AUTOMATED / PENDING_QT_SMOKE / PENDING_HARDWARE"
+main_branch_focus:
+  - "validate V0.5.4 Symbol completion popup height/visibility on real Windows/PySide6"
+  - "verify array/member paths such as buffer[1] and struct.member resolve to the expected real AXF/DWARF addresses"
+  - "continue V0.5.1 Memory interaction hardware checks and V0.5.2 startup AXF auto-load validation"
+  - "continue V0.4.23 Scope RUN-mode hardware validation without reopening old diagnostics"
+
+validated:
+  - "J-Link Memory R/W historical hardware validation"
+  - "Watch worker/statistics/UI decoupling"
+  - "ARMCC5 DWARF3 struct member parsing"
+  - "HSS timestamp separation"
+  - "preallocated Ring Buffer strategy"
+  - "single-ViewBox logical-lane Stacked concept"
+  - "Scope Show/Pause/Start semantics"
+  - "V0.4.23 single-shot absolute-deadline pacing automated regression"
+  - "V0.5.0 Memory Explorer visible-window/symbol/format baseline"
+  - "V0.5.x write path static regression: no default read-back verify"
+  - "V0.5.1 text encoding + batch clipboard pure-Python regression"
+  - "V0.5.2 saved-symbol startup auto-load static regression"
+  - "V0.5.3 local symbol-name index, array/member exact-name resolution, and model-backed completion static regression"
+  - "V0.5.4 stable completion-popup geometry regression"
+
+open_issues:
+  - id: FIX-MEMORY-SYMBOL-POPUP-V054
+    status: CODE_COMPLETE / PENDING_USER_HARDWARE
+    severity: high
+  - id: FEAT-MEMORY-SYMBOL-JUMP-V053
+    status: SUPERSEDED_BY_V054 / PENDING_HARDWARE
+    severity: high
+  - id: FIX-AXF-AUTOLOAD-V052
+    status: CODE_COMPLETE / PENDING_QT_SMOKE
+    severity: medium
+  - id: FEAT-MEMORY-INTERACTION-V051
+    status: CODE_COMPLETE / PENDING_HARDWARE
+    severity: high
+  - id: FEAT-MEMORY-EXPLORER-V050
+    status: SUPERSEDED_BY_V051 / PENDING_HARDWARE
+    severity: high
+  - id: PERF-SCOPE-V043-HARDWARE
+    status: PENDING_HARDWARE
+    severity: high
+  - id: PERF-OVERLAY-LONGRUN
+    status: OPEN
+    severity: high
+  - id: HSS-ACTUAL-RATE
+    status: OPEN
+    severity: medium
+
+latest_context:
+  automated_environment: "Python available; compileall PASS; pytest 59 passed"
+  qt_smoke: "PENDING_ENVIRONMENT: PySide6 unavailable in current execution environment"
+  debugger: none
+  note: "V0.5.4 fixes the user-reproduced custom QCompleter/QTreeView popup collapsing to header-only height; local symbol filtering and target-I/O semantics are unchanged. Runtime confirmation of visible candidate rows remains user-hardware validation."
