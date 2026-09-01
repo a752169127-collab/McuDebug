@@ -1,4 +1,4 @@
-# Scope Rendering V2 Architecture — V0.4.9
+# Scope Rendering V2 Architecture — V0.4.23
 
 ## Core pipeline
 
@@ -19,8 +19,13 @@ PlotCurveItem
         ↓
 Single ViewBox
         ↓
-Presentation Clock
+Single-shot PreciseTimer + Absolute Deadline
 ```
+
+## Presentation clock
+V0.4.23 每个展示帧由一个 single-shot `Qt.PreciseTimer` 驱动。`PresentationPacer` 用浮点绝对 deadline 生成 6/7 ms（144 Hz）或 16/17 ms（60 Hz）等整数毫秒延迟。迟到时直接跳到未来 deadline，不补画漏掉的帧。
+
+这取代 V0.4.20/V0.4.21 的 2~8 ms persistent polling driver，目标是减少 Qt event-loop 无效 timer callback，而不是改变 HSS/RTT 采样率。
 
 ## Stacked
 Stacked uses one ViewBox and maps every channel into a logical vertical lane. There are no follower ViewBoxes. Each lane keeps its own real-value Y range through `LaneMapper`; the lane coordinate is presentation-only.

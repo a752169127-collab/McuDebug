@@ -4,14 +4,15 @@ import math
 
 
 class PresentationPacer:
-    """Absolute-deadline GUI presentation pacer.
+    """Absolute-deadline helper for one single-shot Qt presentation timer.
 
-    QTimer accepts integer milliseconds. A fixed ``int(1000/fps)`` interval
-    overschedules high-refresh targets (144 Hz -> 6 ms -> 166.7 timer events/s)
-    and lets Qt coalesce a varying number of requests, which produces uneven
-    frame pacing. This helper keeps an absolute floating-point deadline and
-    alternates integer millisecond delays as needed (for example 6/7 ms at
-    144 Hz) while skipping missed deadlines instead of issuing catch-up bursts.
+    Qt timers accept integer millisecond delays, while common refresh targets
+    such as 144 Hz have fractional periods.  The pacer keeps a floating-point
+    absolute deadline and returns a positive integer delay for the next frame.
+    Late callbacks skip missed slots instead of issuing catch-up bursts.
+
+    The Release path therefore needs one timer callback per presentation frame
+    rather than a faster persistent polling timer.
     """
 
     def __init__(self, fps: float = 60.0) -> None:
@@ -38,19 +39,16 @@ class PresentationPacer:
         self._next_deadline = None if now is None else float(now) + self._period_s
 
     def next_delay_ms(self, now: float) -> int:
+        """Return the next positive single-shot delay and advance one deadline."""
         now = float(now)
         period = self._period_s
         if self._next_deadline is None:
             self._next_deadline = now + period
         elif self._next_deadline <= now:
-            # Skip missed slots. Never schedule a burst of zero-delay catch-up
-            # callbacks because that creates another form of visible judder.
             missed = math.floor((now - self._next_deadline) / period) + 1
             self._next_deadline += missed * period
 
         delay_s = max(0.001, self._next_deadline - now)
-        # Round against the absolute deadline. The fractional remainder is kept
-        # in _next_deadline, so 144 Hz naturally alternates 6/7 ms callbacks.
         delay_ms = max(1, int(round(delay_s * 1000.0)))
         self._next_deadline += period
         return delay_ms

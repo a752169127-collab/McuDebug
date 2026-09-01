@@ -32,25 +32,6 @@ class LatencyGuardStatus:
     cyclic_gc_disabled: bool = False
     gil_switch_1ms: bool = False
 
-    def short_text(self) -> str:
-        if not self.active:
-            return "latency=off"
-        flags: list[str] = []
-        if self.timer_1ms:
-            flags.append("1ms")
-        if self.power_throttling_disabled:
-            flags.append("EcoOff")
-        if self.process_above_normal:
-            flags.append("P+")
-        if self.gui_thread_above_normal:
-            flags.append("T+")
-        if self.cyclic_gc_disabled:
-            flags.append("GCoff")
-        if self.gil_switch_1ms:
-            flags.append("GIL1ms")
-        return "latency=" + ("/".join(flags) if flags else "on")
-
-
 class LiveLatencyGuard:
     """Temporarily bias the process toward stable frame pacing.
 
@@ -79,7 +60,6 @@ class LiveLatencyGuard:
         self._timer_started = False
         self._old_process_priority: int | None = None
         self._old_thread_priority: int | None = None
-        self._power_throttling_changed = False
         self._old_switch_interval: float | None = None
         self._status = LatencyGuardStatus(False)
 
@@ -210,7 +190,6 @@ class LiveLatencyGuard:
                 ctypes.byref(state),
                 ctypes.sizeof(state),
             ))
-            self._power_throttling_changed = ok
             return ok
         except Exception:
             return False

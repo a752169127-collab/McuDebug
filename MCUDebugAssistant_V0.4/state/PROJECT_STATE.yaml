@@ -1,0 +1,38 @@
+project: MCU Debug Assistant
+state_schema: 1
+current_version: V0.4.23
+version_status: "VERIFIED_AUTOMATED / PENDING_QT_SMOKE / PENDING_HARDWARE"
+main_branch_focus:
+  - "validate V0.4.23 single-shot presentation pacing on real Windows/Qt hardware setup"
+  - "high-refresh long-run stability in RUN mode"
+  - "HSS actual-rate investigation remains separate from viewport FPS"
+
+validated:
+  - "J-Link Memory R/W historical hardware validation"
+  - "Watch worker/statistics/UI decoupling"
+  - "ARMCC5 DWARF3 struct member parsing"
+  - "HSS timestamp separation"
+  - "preallocated Ring Buffer strategy"
+  - "single-ViewBox logical-lane Stacked concept"
+  - "Scope Show/Pause/Start semantics"
+  - "hover adjustSize hot-path removal"
+  - "default Scope stall-investigation runtime removed in V0.4.21"
+  - "V0.4.23 single-shot absolute-deadline pacing automated regression"
+  - "V0.4.23 release append path has no per-chunk ring-resize diagnostic"
+
+open_issues:
+  - id: PERF-SCOPE-V043-HARDWARE
+    status: PENDING_HARDWARE
+    severity: high
+  - id: PERF-OVERLAY-LONGRUN
+    status: OPEN
+    severity: high
+  - id: HSS-ACTUAL-RATE
+    status: OPEN
+    severity: medium
+
+latest_context:
+  automated_environment: "Python available; pytest 39 passed"
+  qt_smoke: "PENDING_ENVIRONMENT: PySide6 unavailable in current execution environment"
+  debugger: none
+  note: "V0.4.23 is a minimal high-performance cleanup based on V0.4.21; real RUN-mode J-Link/Qt A/B is still required"

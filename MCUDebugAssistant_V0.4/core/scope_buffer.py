@@ -45,7 +45,6 @@ class ScopeDataStore:
 
         # Buffer extrema are lazy because they are needed mainly for View All.
         self._extrema_cache: dict[int, tuple[float, float] | None] = {}
-        self._revision = 0
 
     # ---------- Basic properties ----------
     @property
@@ -55,11 +54,6 @@ class ScopeDataStore:
     @property
     def has_data(self) -> bool:
         return self._size > 0
-
-    @property
-    def revision(self) -> int:
-        """Monotonic mutation counter for render-cache diagnostics."""
-        return int(self._revision)
 
     @property
     def first_x(self) -> float | None:
@@ -91,7 +85,6 @@ class ScopeDataStore:
         self._next_sample_index = 0
         self._stats = {}
         self._extrema_cache = {}
-        self._revision += 1
 
     def reserve_capacity(self, required: int, channel_ids: Iterable[int] = ()) -> int:
         """Preallocate a complete live-capture ring outside the hot path.
@@ -187,7 +180,6 @@ class ScopeDataStore:
         self._start = self._physical_index(count)
         self._size -= count
         self._extrema_cache.clear()
-        self._revision += 1
 
     def _trim_time_window(self) -> None:
         if not self.x_is_time or self._size <= 1 or self.last_x is None:
@@ -302,7 +294,6 @@ class ScopeDataStore:
         self._size += n
         self._next_sample_index += n
         self._extrema_cache.clear()
-        self._revision += 1
         self._trim_time_window()
 
     def _update_stats(self, channel_id: int, values: np.ndarray) -> None:

@@ -33,7 +33,6 @@ class ScopeRenderCache:
     channels: dict[int, ChannelRenderData] = field(default_factory=dict)
     source_first_x: float | None = None
     source_last_x: float | None = None
-    build_count: int = 0
     view_span: float | None = None
 
     def clear(self) -> None:
@@ -122,7 +121,6 @@ class ScopeRenderCache:
         self.source_first_x = store.first_x
         self.source_last_x = store.last_x
         self.view_span = float(span)
-        self.build_count += 1
 
     def channel(self, channel_id: int) -> tuple[np.ndarray, np.ndarray]:
         item = self.channels.get(int(channel_id))

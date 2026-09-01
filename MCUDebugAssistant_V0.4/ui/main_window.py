@@ -3,9 +3,10 @@ from __future__ import annotations
 import json
 import os
 import struct
+from collections import deque
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QSettings, QThread, Signal, QMetaObject
+from PySide6.QtCore import Qt, QSettings, QThread, Signal, QMetaObject, QTimer
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -59,7 +60,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("MCU Debug Assistant V0.4.16 - GUI Stall Watchdog")
+        self.setWindowTitle("MCU Debug Assistant V0.4.23 - High Performance")
         self.resize(1220, 820)
         # Keep the window genuinely user-resizable. Scope controls are wrapped
         # into two rows in V0.3.13 so this smaller minimum width is practical.
@@ -75,6 +76,10 @@ class MainWindow(QMainWindow):
         self._pending_manual: dict[int, str] = {}
         self._pending_watch_write: dict[int, int] = {}
         self._symbol_result: ElfParseResult | None = None
+        # Coalesce ordinary GUI log lines so QTextDocument layout never sits on
+        # the high-refresh Scope hot path.
+        self._pending_log_lines: deque[str] = deque(maxlen=5000)
+        self._log_flush_pending = False
 
         self._thread = QThread(self)
         self._worker = JLinkWorker()
@@ -100,7 +105,6 @@ class MainWindow(QMainWindow):
         self._worker.sampling_state_changed.connect(self._on_sampling_state_changed)
         self._worker.scope_samples.connect(self._on_scope_samples)
         self._worker.scope_error.connect(self._on_scope_error)
-        self._worker.scope_perf.connect(self._on_scope_perf)
         self._worker.scope_state_changed.connect(self._on_scope_state_changed)
         self._worker.scope_rtt_format.connect(self._on_scope_rtt_format)
         self._thread.start()
@@ -297,6 +301,10 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(page)
         self.log_edit = QPlainTextEdit()
         self.log_edit.setReadOnly(True)
+        self.log_edit.setUndoRedoEnabled(False)
+        # Product logs remain bounded and do not trigger unnecessary wrapping.
+        self.log_edit.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self.log_edit.document().setMaximumBlockCount(2000)
         layout.addWidget(self.log_edit, 1)
         return page
 
@@ -543,15 +551,6 @@ class MainWindow(QMainWindow):
     def _on_scope_error(self, message: str) -> None:
         self._log(f"SCOPE ERROR: {message}")
         QMessageBox.critical(self, "Scope sampling stopped", message)
-
-    def _on_scope_perf(self, poll_ms: float, read_ms: float, decode_ms: float, frames: int, byte_count: int) -> None:
-        if hasattr(self, "scope_page"):
-            self.scope_page.set_worker_perf(poll_ms, read_ms, decode_ms, frames, byte_count)
-        if max(float(poll_ms), float(read_ms), float(decode_ms)) >= 40.0:
-            self._log(
-                f"Scope worker spike: poll={poll_ms:.1f}ms read={read_ms:.1f}ms "
-                f"decode={decode_ms:.1f}ms frames={int(frames)} bytes={int(byte_count)}"
-            )
 
     def _on_scope_state_changed(self, active: bool, detail: str) -> None:
         self._scope_sampling = bool(active)
@@ -805,7 +804,26 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(self, title, text)
 
     def _log(self, text: str) -> None:
-        self.log_edit.appendPlainText(text)
+        # Never lay out the log document synchronously from a Scope callback.
+        # Queue and coalesce several messages into one appendPlainText() call.
+        self._pending_log_lines.append(str(text))
+        if self._log_flush_pending:
+            return
+        self._log_flush_pending = True
+        QTimer.singleShot(120, self._flush_log_queue)
+
+    def _flush_log_queue(self) -> None:
+        self._log_flush_pending = False
+        if not self._pending_log_lines or not hasattr(self, "log_edit"):
+            return
+        batch: list[str] = []
+        for _ in range(min(64, len(self._pending_log_lines))):
+            batch.append(self._pending_log_lines.popleft())
+        if batch:
+            self.log_edit.appendPlainText("\n".join(batch))
+        if self._pending_log_lines:
+            self._log_flush_pending = True
+            QTimer.singleShot(120, self._flush_log_queue)
 
     # ---------- Persistence ----------
     def _setting(self, key: str, default=None):

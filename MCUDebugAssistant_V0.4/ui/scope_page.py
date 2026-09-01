@@ -5,7 +5,6 @@ import html as html_lib
 import json
 import math
 import time
-from collections import deque
 from datetime import datetime
 
 import numpy as np
@@ -40,7 +39,6 @@ from core.render_cache import ScopeRenderCache
 from core.presentation_pacer import PresentationPacer
 from core.follow_clock import FollowPresentationClock
 from core.latency_guard import LiveLatencyGuard
-from core.gui_watchdog import GuiHeartbeatWatchdog
 from core.lane_mapper import (
     lane_axis_ticks,
     lane_bounds,
@@ -614,75 +612,6 @@ class ScopeGraphicsView(pg.GraphicsLayoutWidget):
         # scene invalidation/dirty-region policy is handed back to Qt.
         self._left_press_pos = None
         self._left_drag_emitted = False
-        self._paint_frames = 0
-        self._paint_rate_started_at = time.perf_counter()
-        self._paint_fps = 0.0
-        self._last_paint_at: float | None = None
-        self._paint_intervals = deque(maxlen=240)
-        # V0.4.14: measure the actual QGraphicsView/QPainter work.  Previous
-        # stall logs only profiled presentation-tick Python code; a long
-        # super().paintEvent() therefore looked like an unexplained event-loop
-        # pause even though it can itself block the GUI thread.
-        self._last_paint_work_ms = 0.0
-        self._max_paint_work_ms = 0.0
-        self._slow_paint_count = 0
-
-    def paintEvent(self, event) -> None:  # noqa: N802
-        paint_started = time.perf_counter()
-        super().paintEvent(event)
-        paint_work_ms = (time.perf_counter() - paint_started) * 1000.0
-        self._last_paint_work_ms = float(paint_work_ms)
-        self._max_paint_work_ms = max(self._max_paint_work_ms, float(paint_work_ms))
-        if paint_work_ms >= 40.0:
-            self._slow_paint_count += 1
-        self._paint_frames += 1
-        now = time.perf_counter()
-        if self._last_paint_at is not None:
-            dt = now - self._last_paint_at
-            if 0.0 < dt < 0.5:
-                self._paint_intervals.append(dt)
-        self._last_paint_at = now
-        elapsed = now - self._paint_rate_started_at
-        if elapsed >= 0.5:
-            self._paint_fps = self._paint_frames / elapsed
-            self._paint_frames = 0
-            self._paint_rate_started_at = now
-
-    def reset_paint_metrics(self) -> None:
-        self._paint_frames = 0
-        self._paint_rate_started_at = time.perf_counter()
-        self._paint_fps = 0.0
-        self._last_paint_at = None
-        self._paint_intervals.clear()
-        self._last_paint_work_ms = 0.0
-        self._max_paint_work_ms = 0.0
-        self._slow_paint_count = 0
-
-    def measured_paint_fps(self) -> float:
-        return float(self._paint_fps)
-
-    def measured_last_paint_work_ms(self) -> float:
-        return float(self._last_paint_work_ms)
-
-    def measured_max_paint_work_ms(self) -> float:
-        return float(self._max_paint_work_ms)
-
-    def measured_slow_paint_count(self) -> int:
-        return int(self._slow_paint_count)
-
-    def measured_paint_jitter_ms(self) -> float:
-        if len(self._paint_intervals) < 3:
-            return 0.0
-        arr = np.asarray(self._paint_intervals, dtype=np.float64)
-        return float(np.std(arr) * 1000.0)
-
-    def measured_paint_1pct_low_fps(self) -> float:
-        """Approximate 1% low FPS from the slowest recent frame intervals."""
-        if len(self._paint_intervals) < 20:
-            return 0.0
-        arr = np.asarray(self._paint_intervals, dtype=np.float64)
-        p99 = float(np.percentile(arr, 99.0))
-        return 0.0 if p99 <= 0.0 else 1.0 / p99
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
         self.setFocus(Qt.FocusReason.MouseFocusReason)
@@ -830,6 +759,10 @@ class ScopePage(QWidget):
     LANE_Y_REFRESH_HZ = 2.0
     LANE_Y_SHRINK_RATIO = 0.72
     LANE_Y_SHRINK_HOLD_S = 1.5
+    # V0.4.18: hover numeric/text work is decoupled from mouse motion.
+    # The vertical cursor may move at high rate, but tooltip sample lookup and
+    # text updates are coalesced, and QLabel geometry is never recomputed per move.
+    HOVER_TOOLTIP_HZ = 30.0
 
     start_requested = Signal(str, object, int)
     stop_requested = Signal()
@@ -847,7 +780,6 @@ class ScopePage(QWidget):
         self._hss_saved_json = "[]"
         self._data = ScopeDataStore(seconds=self.DEFAULT_BUFFER_SECONDS, max_points=1500000)
         self._render_cache = ScopeRenderCache()
-        self._last_geometry_points = 0
         self._plots: list[ScopePlotHandle] = []
         self._stacked_master: ScopePlotHandle | None = None
         # V0.4.8 Stacked is a single ViewBox with multiple logical Y lanes.
@@ -875,6 +807,8 @@ class ScopePage(QWidget):
         self._hover_x: float | None = None
         self._hover_plot: ScopePlotHandle | None = None
         self._hover_scene_pos = None
+        self._hover_pending_host: tuple[int, int, float] | None = None
+        self._last_hover_probe_refresh_at = 0.0
         self._x_lines: dict[str, list[pg.InfiniteLine]] = {"X1": [], "X2": []}
         self._y_lines: dict[str, pg.InfiniteLine | None] = {"Y1": None, "Y2": None}
         self._cursor_values: dict[str, float | None] = {"X1": None, "X2": None, "Y1": None, "Y2": None}
@@ -896,7 +830,6 @@ class ScopePage(QWidget):
         self._last_follow_span: float | None = None
         self._last_follow_scroll_at = 0.0
         self._last_stats_refresh_at = 0.0
-        self._last_view_fps_label_at = 0.0
         self._last_curve_refresh_at = 0.0
         self._curve_data_pending = False
         self._user_dragging = False
@@ -913,22 +846,6 @@ class ScopePage(QWidget):
         # even when this window loses foreground focus, and defer cyclic GC out
         # of the high-refresh acquisition interval.
         self._latency_guard = LiveLatencyGuard()
-        # V0.4.16: out-of-band GUI heartbeat sampler.  All profiled Scope stages
-        # are now sub-10ms on the real target, yet 200-700ms tick gaps remain.
-        # The watchdog samples the main Python stack during the gap instead of
-        # guessing which unprofiled/native callback is responsible.
-        self._gui_watchdog = GuiHeartbeatWatchdog(threshold_ms=120.0, poll_ms=20.0, max_samples_per_episode=4)
-        self._last_watchdog_class = "-"
-        self._last_watchdog_stale_ms = 0.0
-        self._render_frames = 0
-        self._render_rate_started_at = time.perf_counter()
-        self._presentation_tick_count = 0
-        self._presentation_tick_fps = 0.0
-        self._presentation_tick_rate_started_at = time.perf_counter()
-        self._last_presentation_tick_at: float | None = None
-        self._stall_count = 0
-        self._max_stall_ms = 0.0
-        self._last_stall_log_at = 0.0
         # V0.4.14 Transform Follow: high-rate live scrolling translates the
         # already-rendered curve items instead of calling ViewBox.setXRange() on
         # every presentation tick. The expensive ViewBox/Axis/Grid range commit
@@ -938,29 +855,6 @@ class ScopePage(QWidget):
         self._transform_follow_dx = 0.0
         self._transform_follow_last_commit_at = 0.0
         self._transform_follow_commit_hz = 6.0
-        # Lightweight stage profiler used when a GUI stall is detected.
-        self._last_tick_work_ms = 0.0
-        self._last_render_work_ms = 0.0
-        self._last_follow_work_ms = 0.0
-        self._last_setdata_work_ms = 0.0
-        self._last_table_work_ms = 0.0
-        # Worker-side HSS profile is updated by MainWindow via set_worker_perf().
-        # Keeping it here lets a GUI-stall log distinguish QPainter stalls from
-        # J-Link/native-read or Python HSS decode/GIL spikes.
-        self._worker_poll_ms = 0.0
-        self._worker_read_ms = 0.0
-        self._worker_decode_ms = 0.0
-        self._worker_frames = 0
-        self._worker_bytes = 0
-        # V0.4.15 profiles the remaining recurrent GUI callback that was not
-        # covered by the presentation profiler: worker signal -> append_samples
-        # -> ScopeDataStore.append().  Ring capacity changes are tracked because
-        # a live reallocation/copy here blocks the GUI event loop outside
-        # _viewport_tick(), exactly matching the unexplained stall signature.
-        self._last_append_work_ms = 0.0
-        self._max_append_work_ms = 0.0
-        self._live_ring_resize_count = 0
-        self._session_reserved_capacity = int(self._data.capacity)
 
         # Scope acquisition and rendering are intentionally decoupled. Raw samples
         # are appended whenever the worker emits a chunk (up to 60 Hz), while
@@ -979,20 +873,18 @@ class ScopePage(QWidget):
         self._pending_shared_x_range: tuple[float, float, object] | None = None
         self._last_manual_x_sync_at = 0.0
         self._latest_actual_hz = 0.0
-        # V0.4.2 uses ONE GUI presentation scheduler. V0.4.1 had an independent
-        # ~30 Hz render timer plus a 60/120 Hz camera timer; every second 60 Hz
-        # frame tended to collide with the 30 Hz heavy tick, producing the
-        # characteristic 40-ish FPS / periodic hitch.
+        # One GUI presentation scheduler. Acquisition stays independent from
+        # viewport FPS. V0.4.23 uses a single-shot PreciseTimer armed from an
+        # absolute deadline, avoiding the 2~8 ms persistent polling callbacks
+        # used by V0.4.20/V0.4.21 while still skipping missed frame slots.
         self._present_requested = True
-        # V0.4.11 retains V0.4.10 exact-deadline pacing. A repeating 6 ms QTimer for 144 FPS
-        # actually requests 166.7 callbacks/s, causing Qt to coalesce paints in
-        # an irregular 100~140 FPS pattern. A single-shot pacer alternates the
-        # required integer delays (typically 6/7 ms) around a floating deadline.
-        self._presentation_pacer = PresentationPacer(60.0)
+        self._presentation_pacer = PresentationPacer(20.0)
+        self._presentation_in_tick = False
         self._viewport_timer = QTimer(self)
         self._viewport_timer.setSingleShot(True)
         self._viewport_timer.setTimerType(Qt.TimerType.PreciseTimer)
         self._viewport_timer.timeout.connect(self._viewport_tick)
+        self._viewport_timer.start(50)
 
         layout = QVBoxLayout(self)
         layout.addLayout(self._build_toolbar())
@@ -1026,7 +918,7 @@ class ScopePage(QWidget):
         self.canvas.left_drag_finished.connect(self._manual_plot_drag_finished)
         self._canvas_mouse_proxy = pg.SignalProxy(
             self.canvas.scene().sigMouseMoved,
-            rateLimit=60,
+            rateLimit=120,
             slot=lambda args: self._canvas_mouse_moved(args[0]),
         )
         self.canvas.scene().sigMouseClicked.connect(self._canvas_scene_clicked)
@@ -1085,7 +977,17 @@ class ScopePage(QWidget):
             "QLabel { background: rgba(28,28,28,220); color: white; border: 1px solid #808080; "
             "padding: 5px 7px; font-family: Consolas, 'Courier New', monospace; }"
         )
+        self.hover_label.setWordWrap(False)
+        # Never call QLabel.adjustSize() from the mouse-move hot path.  The
+        # overlay keeps a stable rectangle; channel/value text changes repaint
+        # inside it without triggering QWidget geometry/layout propagation.
+        self._update_hover_label_geometry(force=True)
         self.hover_label.hide()
+        self._hover_timer = QTimer(self)
+        self._hover_timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self._hover_timer.setSingleShot(True)
+        self._hover_timer.setInterval(max(1, int(round(1000.0 / self.HOVER_TOOLTIP_HZ))))
+        self._hover_timer.timeout.connect(self._flush_hover_tooltip)
 
         self.channel_table.add_channel("Value1", "0x20000000", "float")
         self._source_changed("HSS")
@@ -1124,7 +1026,7 @@ class ScopePage(QWidget):
         self.fps_combo.setEditable(True)
         self.fps_combo.addItems(["15", "30", "45", "60", "75", "90", "100", "120", "144"])
         self.fps_combo.setCurrentText("60")
-        self.fps_combo.setToolTip("Viewport 目标刷新率 1~144 FPS；V0.4.16 使用GUI Watchdog + 预分配Ring Buffer + Transform Follow + Stall归因 + 绝对Deadline稳帧，不改变 HSS/RTT 原始采样")
+        self.fps_combo.setToolTip("Viewport 目标刷新率 1~144 FPS；单次 PreciseTimer + 绝对 Deadline 调度，每帧只唤醒一次，不改变 HSS/RTT 原始采样")
         if self.fps_combo.lineEdit() is not None:
             self.fps_combo.lineEdit().setValidator(QIntValidator(1, self.VIEWPORT_FPS_MAX, self.fps_combo))
             self.fps_combo.lineEdit().editingFinished.connect(self._fps_changed)
@@ -1136,8 +1038,8 @@ class ScopePage(QWidget):
         self.follow_latest_check.setToolTip("勾选后按固定渲染节拍平滑滚动；手动左键拖动会自动取消跟随")
         self.follow_latest_check.toggled.connect(self._follow_latest_toggled)
         self.actual_label = QLabel("Actual: -")
-        self.view_fps_label = QLabel("View: - fps")
-        self.view_fps_label.setToolTip("P=Qt Paint FPS，T=Presentation Tick FPS；1%=1% Low，J=帧间隔抖动；Stall=GUI事件循环长停顿次数/最大毫秒；FG/BG=窗口焦点状态")
+        self.view_fps_label = QLabel("View target: 60 FPS")
+        self.view_fps_label.setToolTip("Scope 显示目标帧率；采样率与显示帧率相互独立")
         self.start_btn = QPushButton("开始采样")
         self.start_btn.clicked.connect(self._start)
         self.stop_btn = QPushButton("暂停采样")
@@ -1184,10 +1086,8 @@ class ScopePage(QWidget):
         if self._sampling:
             if self._latest_actual_hz > 0:
                 self.actual_label.setText(f"Actual: {self._latest_actual_hz:.4g} Hz")
-            status = self._latency_guard.activate()
-            self._reset_presentation_diagnostics()
-            self._gui_watchdog.start()
-            self.log_requested.emit(f"Scope live latency mode: {status.short_text()}")
+            self._latency_guard.activate()
+            self._restart_presentation_clock(float(self._fps_value()))
             # Start begins a fresh acquisition session; _start() has already
             # cleared the previous buffer. The first arriving samples perform
             # the initial fit through _need_fit.
@@ -1195,52 +1095,18 @@ class ScopePage(QWidget):
             # Pause is an analysis operation: stop acquisition and preserve the
             # exact current X/Y window. Flush only the newest pending display
             # state; never call View All / fit here.
-            self._gui_watchdog.stop()
             self._latency_guard.deactivate()
+            self._restart_presentation_clock(20.0)
             QTimer.singleShot(300, self._collect_idle_gc)
             if self._render_dirty:
                 QTimer.singleShot(0, self._render_if_dirty)
-
-    def _reset_presentation_diagnostics(self) -> None:
-        now = time.perf_counter()
-        self._presentation_tick_count = 0
-        self._presentation_tick_fps = 0.0
-        self._presentation_tick_rate_started_at = now
-        self._last_presentation_tick_at = None
-        self._stall_count = 0
-        self._max_stall_ms = 0.0
-        self._last_stall_log_at = 0.0
-        self._last_watchdog_class = "-"
-        self._last_watchdog_stale_ms = 0.0
-        self._last_tick_work_ms = 0.0
-        self._last_render_work_ms = 0.0
-        self._last_follow_work_ms = 0.0
-        self._last_setdata_work_ms = 0.0
-        self._last_table_work_ms = 0.0
-        self._last_append_work_ms = 0.0
-        self._max_append_work_ms = 0.0
-        self._live_ring_resize_count = 0
-        try:
-            self.canvas.reset_paint_metrics()
-        except Exception:
-            pass
-
-    def set_worker_perf(self, poll_ms: float, read_ms: float, decode_ms: float, frames: int, byte_count: int) -> None:
-        """Receive low-rate acquisition-thread timing diagnostics."""
-        self._worker_poll_ms = float(poll_ms)
-        self._worker_read_ms = float(read_ms)
-        self._worker_decode_ms = float(decode_ms)
-        self._worker_frames = int(frames)
-        self._worker_bytes = int(byte_count)
 
     def _collect_idle_gc(self) -> None:
         # Never collect inside a restarted live session.  The scheduled idle
         # callback is intentionally delayed so Pause remains immediately usable.
         if self._sampling:
             return
-        collected = self._latency_guard.collect_idle()
-        if collected:
-            self.log_requested.emit(f"Scope idle GC: collected {collected} cyclic object(s)")
+        self._latency_guard.collect_idle()
 
     def _update_controls(self) -> None:
         self.start_btn.setEnabled(self._connected and not self._sampling)
@@ -1300,19 +1166,22 @@ class ScopePage(QWidget):
             self.fps_combo.blockSignals(True)
             self.fps_combo.setCurrentText(normalized)
             self.fps_combo.blockSignals(False)
-        self._presentation_pacer.set_fps(float(fps))
-        self._viewport_timer.stop()
-        self._schedule_next_viewport_tick(reset=True)
+        if self._sampling:
+            self._restart_presentation_clock(float(fps))
+        self.view_fps_label.setText(f"View target: {fps} FPS")
         self.fps_changed.emit(fps)
         self._render_dirty = True
         self._present_requested = True
 
-    def _schedule_next_viewport_tick(self, reset: bool = False) -> None:
-        now = time.perf_counter()
-        if reset:
-            self._presentation_pacer.reset(now)
-        delay_ms = self._presentation_pacer.next_delay_ms(now)
-        self._viewport_timer.start(delay_ms)
+    def _restart_presentation_clock(self, fps: float) -> None:
+        """Reset and arm the one-shot presentation timer for the requested FPS."""
+        self._presentation_pacer.set_fps(max(1.0, float(fps)))
+        self._presentation_pacer.reset(time.perf_counter())
+        self._arm_next_presentation()
+
+    def _arm_next_presentation(self) -> None:
+        delay_ms = self._presentation_pacer.next_delay_ms(time.perf_counter())
+        self._viewport_timer.start(max(1, int(delay_ms)))
 
     def _curve_refresh_hz(self) -> float:
         """Heavy curve/cache cadence, independent from camera FPS.
@@ -1346,80 +1215,11 @@ class ScopePage(QWidget):
         # geometry submissions rather than running into the cache tail.
         return min(0.120, max(0.055, 1.35 / max(1.0, self._curve_refresh_hz())))
 
-    def _consume_gui_watchdog_captures(self) -> None:
-        captures = self._gui_watchdog.pop_captures()
-        if not captures:
-            return
-        latest = captures[-1]
-        self._last_watchdog_class = latest.classification
-        self._last_watchdog_stale_ms = max(c.stale_ms for c in captures)
-        # Emit a compact episode summary plus bounded stack samples.  Logging is
-        # performed only after the GUI has resumed, never from the watchdog thread.
-        classes: dict[str, int] = {}
-        for c in captures:
-            classes[c.classification] = classes.get(c.classification, 0) + 1
-        class_text = ",".join(f"{k}:{v}" for k, v in sorted(classes.items()))
-        self.log_requested.emit(
-            f"Scope watchdog: {len(captures)} sample(s) | staleMax={self._last_watchdog_stale_ms:.1f}ms "
-            f"| class={class_text} | watchdogGapMax={self._gui_watchdog.max_poll_gap_ms():.1f}ms"
-        )
-        for index, cap in enumerate(captures, 1):
-            stack_tail = " <- ".join(cap.gui_stack[-6:]) if cap.gui_stack else "<no Python GUI frame>"
-            self.log_requested.emit(
-                f"Scope watchdog[{index}]: stale={cap.stale_ms:.1f}ms class={cap.classification} "
-                f"pollGap={cap.watchdog_poll_gap_ms:.1f}ms | GUI {stack_tail}"
-            )
-            if index == 1 and cap.other_thread_tops:
-                self.log_requested.emit("Scope watchdog threads: " + " | ".join(cap.other_thread_tops))
-
     def _viewport_tick(self) -> None:
-        """One deadline-paced presentation tick for camera + deferred GUI work."""
-        tick_started = time.perf_counter()
-        tick_now = tick_started
-        # Consume any stack samples captured while this GUI thread was stalled,
-        # then publish a fresh heartbeat for the next interval.
-        self._consume_gui_watchdog_captures()
-        if self._sampling:
-            self._gui_watchdog.beat(tick_now)
-        if self._last_presentation_tick_at is not None:
-            dt = tick_now - self._last_presentation_tick_at
-            # Count only genuine event-loop stalls, not ordinary one-frame jitter.
-            threshold = max(0.080, 6.0 / max(1.0, float(self._fps_value())))
-            if dt > threshold:
-                stall_ms = dt * 1000.0
-                self._stall_count += 1
-                self._max_stall_ms = max(self._max_stall_ms, stall_ms)
-                if tick_now - self._last_stall_log_at >= 5.0:
-                    self._last_stall_log_at = tick_now
-                    self.log_requested.emit(
-                        f"Scope GUI stall: {stall_ms:.1f} ms | "
-                        f"tick={self._presentation_tick_fps:.0f}/{self._fps_value()} fps | "
-                        f"pts={int(getattr(self, '_last_geometry_points', 0))} | "
-                        f"prevWork={self._last_tick_work_ms:.1f}ms "
-                        f"render={self._last_render_work_ms:.1f}ms "
-                        f"follow={self._last_follow_work_ms:.1f}ms "
-                        f"setData={self._last_setdata_work_ms:.1f}ms "
-                        f"table={self._last_table_work_ms:.1f}ms "
-                        f"append={self._last_append_work_ms:.1f}/{self._max_append_work_ms:.1f}ms "
-                        f"cap={self._data.capacity} resize={self._live_ring_resize_count} | "
-                        f"paint={self.canvas.measured_last_paint_work_ms():.1f}ms "
-                        f"paintMax={self.canvas.measured_max_paint_work_ms():.1f}ms "
-                        f"slowPaint={self.canvas.measured_slow_paint_count()} | "
-                        f"worker={self._worker_poll_ms:.1f}ms "
-                        f"read={self._worker_read_ms:.1f}ms "
-                        f"decode={self._worker_decode_ms:.1f}ms "
-                        f"frames={self._worker_frames} bytes={self._worker_bytes} | "
-                        f"wd={self._last_watchdog_class}/{self._last_watchdog_stale_ms:.0f}ms "
-                        f"wdGap={self._gui_watchdog.max_poll_gap_ms():.0f}ms"
-                    )
-        self._last_presentation_tick_at = tick_now
-        self._presentation_tick_count += 1
-        tick_elapsed = tick_now - self._presentation_tick_rate_started_at
-        if tick_elapsed >= 0.5:
-            self._presentation_tick_fps = self._presentation_tick_count / tick_elapsed
-            self._presentation_tick_count = 0
-            self._presentation_tick_rate_started_at = tick_now
-
+        """Present one frame, then arm the next absolute-deadline callback."""
+        if self._presentation_in_tick:
+            return
+        self._presentation_in_tick = True
         try:
             if self._rebuilding_plots:
                 return
@@ -1434,50 +1234,17 @@ class ScopePage(QWidget):
                 and self.follow_latest_check.isChecked()
                 and self._data.has_data
             ):
-                follow_started = time.perf_counter()
                 moved = self._follow_latest(force=False, smooth=True)
-                self._last_follow_work_ms = (time.perf_counter() - follow_started) * 1000.0
-                if moved:
-                    self._render_frames += 1
-
-            now = time.perf_counter()
-            if now - self._last_view_fps_label_at >= 0.8:
-                measured = self.canvas.measured_paint_fps()
-                jitter = self.canvas.measured_paint_jitter_ms()
-                low1 = self.canvas.measured_paint_1pct_low_fps()
-                low_text = f" 1%:{low1:.0f}" if low1 > 0 else ""
-                pts = int(getattr(self, "_last_geometry_points", 0))
-                pts_text = f" pts:{pts / 1000.0:.1f}k" if pts >= 1000 else f" pts:{pts}"
-                try:
-                    focus_text = "FG" if self.window().isActiveWindow() else "BG"
-                except Exception:
-                    focus_text = "?"
-                self.view_fps_label.setText(
-                    f"P:{measured:.0f}/{self._fps_value()} T:{self._presentation_tick_fps:.0f}"
-                    f"{low_text} J:{jitter:.1f}ms "
-                    f"Stall:{self._stall_count}/{self._max_stall_ms:.0f}ms{pts_text} "
-                    f"W:{self._last_tick_work_ms:.1f} F:{self._last_follow_work_ms:.1f} "
-                    f"Paint:{self.canvas.measured_last_paint_work_ms():.1f}/{self.canvas.measured_max_paint_work_ms():.0f}ms "
-                    f"A:{self._last_append_work_ms:.1f}/{self._max_append_work_ms:.0f}ms "
-                    f"Cap:{self._data.capacity} R:{self._live_ring_resize_count} "
-                    f"WD:{self._last_watchdog_class}/{self._last_watchdog_stale_ms:.0f} {focus_text}"
-                )
-                self._last_view_fps_label_at = now
 
             # Only request a paint when the camera/presentation actually changed.
-            # The old unconditional Follow request caused 144-FPS mode to ask Qt
-            # for a repaint even on ticks with no sub-pixel camera movement.
             if moved or self._present_requested:
                 self._present_requested = False
                 self.canvas.viewport().update()
         finally:
-            self._last_tick_work_ms = (time.perf_counter() - tick_started) * 1000.0
-            # Single-shot absolute-deadline pacing: never overschedule 144 Hz as
-            # a fixed 6 ms / 166.7 Hz timer and never issue catch-up bursts.
-            self._schedule_next_viewport_tick(reset=False)
+            self._presentation_in_tick = False
+            self._arm_next_presentation()
 
     def _render_if_dirty(self) -> None:
-        render_started = time.perf_counter()
         if self._rebuilding_plots:
             return
 
@@ -1496,14 +1263,10 @@ class ScopePage(QWidget):
         # mouse is held.  HSS/RTT still appends raw samples in the background.
         if self._user_dragging:
             self._flush_pending_manual_x_sync(force=False)
-            self._render_frames += 1
-            self._last_render_work_ms = (time.perf_counter() - render_started) * 1000.0
             return
 
         if data_dirty and now - self._last_stats_refresh_at >= 1.0 / self._stats_refresh_hz():
-            table_started = time.perf_counter()
             self.channel_table.update_statistics(self._data.stats_snapshot())
-            self._last_table_work_ms = (time.perf_counter() - table_started) * 1000.0
             self._last_stats_refresh_at = now
             if self._latest_actual_hz > 0:
                 suffix = "" if self._sampling else " (paused)"
@@ -1537,8 +1300,6 @@ class ScopePage(QWidget):
             self._last_rendered_data_first_x = self._data.first_x
             self._last_rendered_data_last_x = self._data.last_x
             self._present_requested = True
-        self._render_frames += 1
-        self._last_render_work_ms = (time.perf_counter() - render_started) * 1000.0
 
     def _new_data_affects_visible_window(self) -> bool:
         """Whether appended/trimmed raw data can change the fixed visible X slice.
@@ -1641,12 +1402,12 @@ class ScopePage(QWidget):
             seconds = max(1, int(self.buffer_seconds_spin.value()))
             reserve_points = int(math.ceil(requested_hz * seconds * 1.10)) + max(256, requested_hz // 2)
             channel_ids = self.channel_table.ordered_channel_ids()
-            self._session_reserved_capacity = self._data.reserve_capacity(reserve_points, channel_ids)
+            reserved_capacity = self._data.reserve_capacity(reserve_points, channel_ids)
             self._need_fit = True
             self.start_requested.emit(self._source, specs, requested_hz)
             self.log_requested.emit(
                 f"Scope: new acquisition session; previous buffered data cleared | "
-                f"ring preallocated={self._session_reserved_capacity} samples "
+                f"ring preallocated={reserved_capacity} samples "
                 f"for {seconds}s @ requested {requested_hz}Hz"
             )
         except Exception as exc:
@@ -1691,20 +1452,10 @@ class ScopePage(QWidget):
         )
 
     def append_samples(self, times, values, actual_hz: float, x_is_time: bool) -> None:
-        append_started = time.perf_counter()
-        capacity_before = int(self._data.capacity)
+        # Session capacity is reserved before acquisition starts. Keep the GUI
+        # append path free of diagnostic capacity comparisons/log construction.
         self._x_is_time = bool(x_is_time)
         self._data.append(times, values, x_is_time)
-        capacity_after = int(self._data.capacity)
-        append_ms = (time.perf_counter() - append_started) * 1000.0
-        self._last_append_work_ms = append_ms
-        self._max_append_work_ms = max(self._max_append_work_ms, append_ms)
-        if self._sampling and capacity_after != capacity_before:
-            self._live_ring_resize_count += 1
-            self.log_requested.emit(
-                f"Scope WARNING: live ring resize {capacity_before}->{capacity_after} "
-                f"during append ({append_ms:.1f} ms); increase preallocation margin"
-            )
         self._latest_data_arrival_at = time.perf_counter()
         self._latest_data_x = self._data.last_x
         if self._x_is_time and self._latest_data_x is not None:
@@ -2110,6 +1861,8 @@ class ScopePage(QWidget):
         self._curve_data_pending = True
         self._interaction_cache_active = False
         self._interaction_cache_range = None
+        if hasattr(self, "hover_label"):
+            self._update_hover_label_geometry(force=True)
         self._render_if_dirty()
 
     def _remember_connection(self, signal, slot) -> None:
@@ -2186,6 +1939,7 @@ class ScopePage(QWidget):
         if curve is not None:
             curve.setVisible(visible)
         self._update_overlay_selection_style()
+        self._update_hover_label_geometry(force=True)
         self._force_curve_redraw = True
         self._render_dirty = True
         self._present_requested = True
@@ -2338,27 +2092,57 @@ class ScopePage(QWidget):
         self._hover_x = x_value
         self._show_hover_at_host_pos(int(local_host.x()), int(local_host.y()), x_value)
 
-    def _show_hover_at_host_pos(self, host_x: int, host_y: int, x_value: float) -> None:
-        # Pixel-space line: it follows the mouse rather than a data X coordinate,
-        # so live scrolling cannot leave old InfiniteLine paint artifacts behind.
+    def _update_hover_label_geometry(self, force: bool = False) -> None:
+        """Reserve a stable tooltip rectangle without per-sample layout work."""
+        if not hasattr(self, "hover_label"):
+            return
+        visible_count = max(1, len(self.channel_table.visible_channel_ids()) if hasattr(self, "channel_table") else 1)
+        host_w = max(320, int(self.plot_host.width()) if hasattr(self, "plot_host") else 640)
+        host_h = max(120, int(self.plot_host.height()) if hasattr(self, "plot_host") else 400)
+        width = min(680, max(360, host_w - 36))
+        height = min(max(54, 30 + visible_count * 19), max(54, host_h - 16))
+        if force or self.hover_label.width() != width or self.hover_label.height() != height:
+            self.hover_label.setFixedSize(width, height)
+
+    def _position_hover_overlay(self, host_x: int, host_y: int) -> None:
+        # Pixel-space line follows the mouse immediately; no data/layout work.
         x_line = min(max(0, int(host_x)), max(0, self.plot_host.width() - 1))
         self.hover_vline.setGeometry(x_line, 0, 1, max(1, self.plot_host.height()))
         self.hover_vline.raise_()
         self.hover_vline.show()
+        # Geometry is cached; only shrink it if the host became narrower.
+        if self.hover_label.width() > max(360, self.plot_host.width() - 8):
+            self._update_hover_label_geometry(force=True)
+        x = min(max(4, x_line + 14), max(4, self.plot_host.width() - self.hover_label.width() - 4))
+        y = min(max(4, int(host_y) + 14), max(4, self.plot_host.height() - self.hover_label.height() - 4))
+        self.hover_label.move(x, y)
 
+    def _show_hover_at_host_pos(self, host_x: int, host_y: int, x_value: float) -> None:
+        # Mouse events only update the pixel cursor and newest requested probe.
+        # Numeric lookup/text formatting is coalesced by the 30 Hz hover timer.
+        self._position_hover_overlay(host_x, host_y)
+        self._hover_pending_host = (int(host_x), int(host_y), float(x_value))
+        if not self._hover_timer.isActive():
+            self._hover_timer.start()
+
+    def _flush_hover_tooltip(self) -> None:
+        pending = self._hover_pending_host
+        if pending is None or self._user_dragging or not self._data.has_data:
+            return
+        host_x, host_y, x_value = pending
+        self._hover_pending_host = None
+        self._position_hover_overlay(host_x, host_y)
         self._update_hover_tooltip(x_value)
-        try:
-            self.hover_label.adjustSize()
-            x = min(max(4, x_line + 14), max(4, self.plot_host.width() - self.hover_label.width() - 4))
-            y = min(max(4, int(host_y) + 14), max(4, self.plot_host.height() - self.hover_label.height() - 4))
-            self.hover_label.move(x, y)
+        if self.hover_label.text():
             self.hover_label.raise_()
             self.hover_label.show()
-        except Exception:
-            pass
 
     def _refresh_hover_probe(self) -> None:
-        """Refresh the sample under a stationary mouse after the X window scrolls."""
+        """Refresh a stationary probe at a bounded rate while live Follow moves."""
+        now = time.perf_counter()
+        if now - self._last_hover_probe_refresh_at < 1.0 / self.HOVER_TOOLTIP_HZ:
+            return
+        self._last_hover_probe_refresh_at = now
         plot = self._hover_plot
         scene_pos = self._hover_scene_pos
         if plot is None or scene_pos is None or not self._data.has_data:
@@ -2404,6 +2188,9 @@ class ScopePage(QWidget):
         self._hover_x = None
         self._hover_plot = None
         self._hover_scene_pos = None
+        self._hover_pending_host = None
+        if hasattr(self, "_hover_timer") and self._hover_timer.isActive():
+            self._hover_timer.stop()
         if hasattr(self, "hover_vline"):
             self.hover_vline.hide()
         if hasattr(self, "hover_label"):
@@ -2618,13 +2405,10 @@ class ScopePage(QWidget):
         # ViewBox.update(), PlotItem.update() and scene.update() fan-out here:
         # those were added while chasing the follower-lane symptom but did not
         # solve it and can perturb QGraphicsScene cache/invalidation ordering.
-        started = time.perf_counter()
         self.canvas.setUpdatesEnabled(False)
-        geometry_points = 0
         try:
             for cid, curve in self._curves.items():
                 x, y = self._render_cache.channel(cid)
-                geometry_points += int(x.size)
                 gain, offset = self.channel_table.gain_offset(cid)
                 if abs(gain - 1.0) <= 1e-15 and abs(offset) <= 1e-15:
                     display_y = y
@@ -2635,8 +2419,6 @@ class ScopePage(QWidget):
                 curve.setData(x, display_y)
         finally:
             self.canvas.setUpdatesEnabled(True)
-        self._last_geometry_points = int(geometry_points)
-        self._last_setdata_work_ms = (time.perf_counter() - started) * 1000.0
         if self._transform_follow_active:
             self._apply_transform_follow_shift(self._transform_follow_dx)
         self._present_requested = True
@@ -2685,9 +2467,7 @@ class ScopePage(QWidget):
 
         now = time.perf_counter()
         if now - self._last_stats_refresh_at >= 1.0 / self._stats_refresh_hz():
-            table_started = time.perf_counter()
             self.channel_table.update_statistics(self._data.stats_snapshot())
-            self._last_table_work_ms = (time.perf_counter() - table_started) * 1000.0
             self._last_stats_refresh_at = now
 
         if follow_moved:

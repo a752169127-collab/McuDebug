@@ -25,11 +25,9 @@ def test_new_data_outside_static_history_does_not_invalidate_coverage():
     store.append(x, {1: x}, True)
     cache = ScopeRenderCache()
     cache.build(store, [1], (5.0, 7.0), display_limit_per_channel=500, margin_spans=1.0)
-    builds = cache.build_count
 
     store.append(np.arange(20.0, 22.0, 0.01), {1: np.arange(20.0, 22.0, 0.01)}, True)
     assert cache.covers((5.0, 7.0), [1])
-    assert cache.build_count == builds
 
 
 def test_render_geometry_budget_does_not_grow_with_prefetch_width():
