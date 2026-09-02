@@ -1,0 +1,76 @@
+project: MCU Debug Assistant
+state_schema: 1
+current_version: V0.6.3
+version_status: "VERIFIED_AUTOMATED / PENDING_QT_SMOKE / PENDING_HARDWARE"
+main_branch_focus:
+  - "validate V0.6.3 persistent Results, Avg/Min/Max default SAMPLE, clipboard-to-Excel and manual Clear Results with a real AXF + J-Link target"
+  - "validate multi-signal WAIT STABLE, timeout actions, SAMPLE statistics, and manual external measurement on hardware"
+  - "validate Parameter Matrix enumeration with short RPM lists/ranges before long sweeps"
+  - "keep V0.5.5 Memory/Watch fixes under regression while Automation is introduced"
+  - "continue V0.4.23 Scope RUN-mode hardware validation without reopening old diagnostics"
+
+validated:
+  - "J-Link Memory R/W historical hardware validation"
+  - "Watch worker/statistics/UI decoupling"
+  - "ARMCC5 DWARF3 struct member parsing"
+  - "HSS timestamp separation"
+  - "preallocated Ring Buffer strategy"
+  - "single-ViewBox logical-lane Stacked concept"
+  - "Scope Show/Pause/Start semantics"
+  - "V0.4.23 single-shot absolute-deadline pacing automated regression"
+  - "V0.5.x Symbol-aware Memory Explorer core/static regression"
+  - "V0.5.x default write path static regression: no forced read-back verify"
+  - "V0.5.5 Symbol column resize/persistence static regression"
+  - "V0.5.5 Watch Set Value dirty focus-out commit static regression"
+  - "V0.6.0 Parameter Matrix List/Range/Cartesian/Zip pure-core regression"
+  - "V0.6.0 multi-signal StableDetector and Sample Avg/Min/Max/Std pure-core regression"
+  - "V0.6.0 Calculate/Assert helpers retained for legacy-plan compatibility"
+  - "V0.6.1 simplified editor step surface static regression"
+  - "V0.6.1 recursive StepDialog layout cleanup static regression"
+  - "V0.6.2 explicit result projection / Runtime separation static regression"
+  - "V0.6.3 Avg/Min/Max default SAMPLE + persistent Results + TSV clipboard + explicit clear static regression"
+  - "V0.6.2 completed-run Runtime cleanup + Results auto-switch static regression"
+  - "V0.6.0 Test Automation UI/MainWindow/JLinkWorker static architecture regression"
+
+open_issues:
+  - id: UX-AUTOMATION-RESULT-HISTORY-V063
+    status: CODE_COMPLETE / PENDING_QT_SMOKE / PENDING_HARDWARE
+    severity: medium
+  - id: UX-AUTOMATION-RESULTS-V062
+    status: CODE_COMPLETE / PENDING_QT_SMOKE / PENDING_HARDWARE
+    severity: medium
+  - id: FEAT-TEST-AUTOMATION-V060
+    status: CODE_COMPLETE / PENDING_QT_SMOKE / PENDING_HARDWARE
+    severity: high
+  - id: FIX-MEMORY-SYMBOL-WIDTH-V055
+    status: CODE_COMPLETE / PENDING_USER_HARDWARE
+    severity: medium
+  - id: FIX-WATCH-SETVALUE-FOCUSOUT-V055
+    status: CODE_COMPLETE / PENDING_USER_HARDWARE
+    severity: high
+  - id: FIX-MEMORY-SYMBOL-POPUP-V054
+    status: CODE_COMPLETE / PENDING_USER_HARDWARE
+    severity: high
+  - id: FIX-AXF-AUTOLOAD-V052
+    status: CODE_COMPLETE / PENDING_QT_SMOKE
+    severity: medium
+  - id: FEAT-MEMORY-INTERACTION-V051
+    status: CODE_COMPLETE / PENDING_HARDWARE
+    severity: high
+  - id: PERF-SCOPE-V043-HARDWARE
+    status: PENDING_HARDWARE
+    severity: high
+  - id: PERF-OVERLAY-LONGRUN
+    status: OPEN
+    severity: high
+  - id: HSS-ACTUAL-RATE
+    status: OPEN
+    severity: medium
+
+latest_context:
+  automated_environment: "Python available; compileall PASS; pytest 87 passed"
+  qt_smoke: "PENDING_ENVIRONMENT: PySide6 unavailable in current execution environment"
+  hardware: "PENDING_HARDWARE: real AXF/J-Link Test Automation execution not run here"
+  external_instruments: "V0.6.3 uses MANUAL INPUT; PF300/VT650 automatic adapters are future work"
+  debugger: none
+  note: "V0.6.3 keeps Runtime separate, defaults SAMPLE results to Avg/Min/Max, accumulates Results across runs, copies TSV directly to Excel, and only clears results explicitly."

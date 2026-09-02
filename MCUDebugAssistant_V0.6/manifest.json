@@ -1,0 +1,47 @@
+{
+  "schema": 1,
+  "name": "测试用例",
+  "combination": "cartesian",
+  "parameters": [
+    {
+      "end": 2000.0,
+      "name": "SetRef",
+      "source": "range",
+      "start": 1000.0,
+      "step": 200.0,
+      "values": "10, 20, 30"
+    }
+  ],
+  "steps": [
+    {
+      "kind": "SET",
+      "variable": "BlowerParamsObj.m_TrapezoidDelayPos",
+      "value": "${SetRef}"
+    },
+    {
+      "kind": "WAIT",
+      "duration_s": 3.0
+    },
+    {
+      "kind": "SAMPLE",
+      "variables": [
+        "BlowerParamsObj.m_Position",
+        "BlowerParamsObj.m_TrapezoidDelayPos"
+      ],
+      "duration_s": 3.0,
+      "interval_ms": 100
+    },
+    {
+      "kind": "MANUAL_INPUT",
+      "fields": [
+        {
+          "name": "Pressure",
+          "unit": "cmH2O"
+        }
+      ]
+    },
+    {
+      "kind": "SAVE_RESULT"
+    }
+  ]
+}
