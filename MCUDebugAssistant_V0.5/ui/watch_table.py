@@ -19,24 +19,41 @@ from core.watch import RunningStats, WatchVariableSpec
 
 
 class SetValueDelegate(QStyledItemDelegate):
-    """Emit a write request only when Enter/Return is pressed in Set Value."""
+    """Commit Set Value on Enter *or* when a modified editor loses focus.
 
-    enter_pressed = Signal(int)
+    A QTable delegate normally commits the model on focus-out, but the old product
+    behavior only emitted the target write from ``returnPressed``. That meant a
+    user could type a Set Value, click another cell, see the edit committed in the
+    table, yet never write it to the MCU. Track actual user edits and use the same
+    write path for Enter and focus-out.
+    """
+
+    commit_requested = Signal(int)
 
     def createEditor(self, parent, option, index):
         editor = super().createEditor(parent, option, index)
         if isinstance(editor, QLineEdit):
             persistent_index = QPersistentModelIndex(index)
+            editor.setProperty("watch_set_value_dirty", False)
 
-            def on_return_pressed() -> None:
-                # Commit editor text to the model first, then notify the table on
-                # the next event-loop turn so the write uses the new text.
+            def mark_dirty(_text: str) -> None:
+                editor.setProperty("watch_set_value_dirty", True)
+
+            def commit_if_dirty() -> None:
+                if not bool(editor.property("watch_set_value_dirty")):
+                    return
+                # Clear first so Return -> editingFinished cannot queue the same
+                # write twice. commitData updates the QTableWidgetItem before the
+                # deferred write request reads its text.
+                editor.setProperty("watch_set_value_dirty", False)
                 self.commitData.emit(editor)
                 row = persistent_index.row()
                 if row >= 0:
-                    QTimer.singleShot(0, lambda r=row: self.enter_pressed.emit(r))
+                    QTimer.singleShot(0, lambda r=row: self.commit_requested.emit(r))
 
-            editor.returnPressed.connect(on_return_pressed)
+            editor.textEdited.connect(mark_dirty)
+            editor.returnPressed.connect(commit_if_dirty)
+            editor.editingFinished.connect(commit_if_dirty)
         return editor
 
 
@@ -102,7 +119,7 @@ class WatchTable(QTableWidget):
         self._states: dict[int, WatchRowState] = {}
 
         self._set_value_delegate = SetValueDelegate(self)
-        self._set_value_delegate.enter_pressed.connect(self._on_set_value_enter)
+        self._set_value_delegate.commit_requested.connect(self._on_set_value_commit)
         self.setItemDelegateForColumn(self.COL_SET, self._set_value_delegate)
 
         self.itemChanged.connect(self._on_item_changed)
@@ -526,7 +543,7 @@ class WatchTable(QTableWidget):
             if isinstance(combo, QComboBox):
                 combo.setEnabled(editable)
 
-    def _on_set_value_enter(self, row: int) -> None:
+    def _on_set_value_commit(self, row: int) -> None:
         row_id = self.row_id_at(row)
         if row_id is not None:
             self.write_requested.emit(row_id)

@@ -43,7 +43,7 @@ MCU Debug Assistant 是一个 Python 桌面 MCU 调试工具，目标体验接�
 - Byte Hex pane 支持 CE 式两位 Hex 直接写；非 Byte typed view 支持 in-cell editor。
 - 鼠标拖动/Shift 可选择连续 byte range；Ctrl+C/右键可批量复制 Hex 或按当前文本编码复制。
 - 双击 Value/Text 打开编辑弹窗；按 OK 后直接进入 Worker 写入，不再弹第二层 confirmation。
-- Symbol 列为固定宽度单行对齐列，长名称 elide；一行优先一个最相关的 exact/offset symbol，避免多符号拼接覆盖 Hex。
+- Symbol 列为单行对齐列，长名称 elide；右边界可鼠标拖动调整宽度并持久化，一行优先一个最相关的 exact/offset symbol，避免多符号拼接覆盖 Hex。
 - Address 使用与 Memory value 不同的 palette role，便于视觉区分。
 - Context Menu：显示符号、符号偏移、变化、分隔符、编辑、复制/粘贴、加 Watch。
 - `SymbolIndex` 优先精确 DWARF scalar/member，再解析 containing symbol + offset。
@@ -52,7 +52,7 @@ MCU Debug Assistant 是一个 Python 桌面 MCU 调试工具，目标体验接�
 ### Watch
 - 多变量
 - Current / Average / Min / Max
-- Enter 写 Set Value
+- Enter 或输入后失焦写 Set Value（仅实际编辑触发，Enter/focus-out 去重）
 - 多选删除
 - Average 以 Tab 分隔复制到 Excel
 - AXF Reload Rebind
@@ -182,6 +182,12 @@ V0.4 主线从“功能堆叠”转为“Rendering V2 + Release 热路径收敛�
 - 暂停时降为 20 Hz 轻量 presentation clock
 - GUI append 热路径不做 ring-capacity 诊断比较/日志构造
 - 默认 Release 不安装 watchdog、event-loop probe、debugger detector 或逐帧 profiling
+
+### V0.5.5 Interaction 基线
+- Memory Symbol 列宽可从 Symbol/Hex 分隔线直接拖动，12~120 个等宽字符范围；双击分隔线恢复默认 32 字符宽。
+- Symbol resize 只更新本地几何/scrollbar/paint，不触发 AXF parsing、Symbol model rebuild 或 J-Link read。
+- Watch Set Value 使用 dirty editor 语义：`textEdited` 后 Enter 或 `editingFinished` 都提交，未修改 focus-out 不写，dirty 在首次 commit 前清除以防 Enter+editingFinished 双发。
+- 默认 Write 仍只走 WriteMemEx，不恢复 read-back verify。
 
 ### V0.5.4 Memory Explorer 交互基线
 - 保留 V0.4.23 Scope 高性能架构，不因 Memory 功能重构 Scope。

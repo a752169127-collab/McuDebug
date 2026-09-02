@@ -59,3 +59,13 @@ V0.5.3 的 Memory `Address / Symbol` 输入不在每个字符输入时重新构�
 
 理由：符号搜索是纯元数据操作，与目标内存读取无关；把每次键入绑定到模型重建或 J-Link I/O 会复现早期 Watch/AXF 搜索卡顿。数组和结构体地址直接复用 parser 已展开的完整路径，不新增运行时 C 表达式求值器。
 
+
+## ADR-014 — Memory Symbol Width Is Presentation State
+V0.5.5 允许用户拖动 Memory Symbol/Hex 分隔线并持久化 `symbol_width_px`。该动作只更新本地 column geometry、horizontal scrollbar 和 repaint，禁止触发 AXF/DWARF 重解析、Symbol model rebuild 或 J-Link I/O。
+
+理由：长结构体/数组成员路径需要临时展开查看，但列宽调整本质是 Presentation 需求，不应污染符号解析或目标访问热路径。
+
+## ADR-015 — Watch Set Value Commits on Enter or Modified Focus-out
+V0.5.5 将 Set Value 的提交边界定义为“用户完成一次实际编辑”：`textEdited` 后，Enter 或 editor 的 `editingFinished` 都执行一次 commit + write。未修改的 focus-out 不写；dirty 在首次 commit 前清零，避免 Return 与 editingFinished 对同一次编辑重复写。
+
+理由：只监听 `returnPressed` 会让点击别处时出现 UI 已提交但目标未写的语义不一致；而无 dirty guard 的 focus-out 又可能造成误写或双写。

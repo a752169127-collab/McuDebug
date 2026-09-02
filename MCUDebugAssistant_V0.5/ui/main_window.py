@@ -63,7 +63,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("MCU Debug Assistant V0.5.4 - Memory Explorer")
+        self.setWindowTitle("MCU Debug Assistant V0.5.5 - Memory Explorer")
         self.resize(1220, 820)
         # Keep the window genuinely user-resizable. Scope controls are wrapped
         # into two rows in V0.3.13 so this smaller minimum width is practical.
@@ -256,7 +256,7 @@ class MainWindow(QMainWindow):
             "Watch 使用 JLINK_ReadMemEx 周期采样；相邻变量会自动合并读取。"
             "采样/统计在 J-Link Worker 中按设定频率运行，界面最多约 25 Hz 批量刷新，"
             "因此 Average/Min/Max 不会因为降低 GUI 刷新率而丢样本。"
-            "Set Value 按 Enter 立即写入；WriteMemEx 返回完整长度即认为写入成功，不再额外回读校验；Shift/Ctrl 多选，Delete 可批量删除。"
+            "Set Value 按 Enter 或输入后点击其它位置都会立即写入；WriteMemEx 返回完整长度即认为写入成功，不再额外回读校验；Shift/Ctrl 多选，Delete 可批量删除。"
         )
         hint.setWordWrap(True)
         layout.addWidget(hint)
@@ -382,7 +382,7 @@ class MainWindow(QMainWindow):
         self._log("Watch statistics cleared")
 
     def _write_watch_row(self, row_id: int) -> None:
-        """Write Set Value immediately when Enter is pressed in that Watch row."""
+        """Write a committed Set Value from Enter or editor focus-out."""
         try:
             if not self._connected:
                 raise RuntimeError("J-Link is not connected")

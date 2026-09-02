@@ -1,5 +1,57 @@
 # ISSUE_LEDGER
 
+## FIX-MEMORY-SYMBOL-WIDTH-V055
+Status: CODE_COMPLETE / PENDING_USER_HARDWARE
+
+### Version
+V0.5.5
+
+### Symptom
+Memory Symbol 列宽固定，长变量/成员路径只能看到 elide 文本，用户无法主动拉宽查看完整名称。
+
+### Root cause
+自绘 `HexMemoryView._column_geometry()` 将 Symbol 宽度硬编码为 `cw * 32`，没有任何 resize hit-test / drag state。
+
+### Fix
+- Symbol/Hex 分隔线增加 SizeHor hit-test 与拖动 resize。
+- 宽度限制 12~120 等宽字符；双击分隔线恢复默认。
+- `symbol_width_px` 纳入 Memory Explorer settings 持久化。
+- resize 只重算本地 geometry/scrollbar/repaint，不访问 J-Link。
+
+### Verification
+- compileall: PASS
+- pytest: 63 passed
+- static regression: PASS
+- Real Windows drag/visual behavior: PENDING_USER_HARDWARE
+
+---
+
+## FIX-WATCH-SETVALUE-FOCUSOUT-V055
+Status: CODE_COMPLETE / PENDING_USER_HARDWARE
+
+### Version
+V0.5.5
+
+### Symptom
+Watch Set Value 输入新值后，如果不按 Enter 而直接点击其它位置，编辑内容可离开 editor，但不会触发 MCU 写入。
+
+### Root cause
+旧 `SetValueDelegate` 的 `write_requested` 只由 `QLineEdit.returnPressed` 驱动；focus-out 的常规 model commit 没有对应 target write 信号。
+
+### Fix
+- `textEdited` 标记 dirty。
+- Enter 与 `editingFinished` 共用 `commit_if_dirty()`：先 `commitData`，下一 event-loop turn 发 write request。
+- commit 前清 dirty，避免 Enter 之后紧接 editingFinished 对同一次编辑重复写。
+- 未修改 editor 的 focus-out 不写。
+
+### Verification
+- compileall: PASS
+- pytest: 63 passed
+- static delegate regression: PASS
+- Real J-Link click-away write: PENDING_USER_HARDWARE
+
+---
+
 ## FIX-MEMORY-SYMBOL-POPUP-V054
 Status: CODE_COMPLETE / PENDING_USER_HARDWARE
 

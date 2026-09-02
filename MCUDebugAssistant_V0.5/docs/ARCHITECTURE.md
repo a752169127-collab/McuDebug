@@ -97,3 +97,29 @@ Scope Acquisition Rate、Heavy Curve Refresh、Presentation FPS 继续彼此独�
 - Memory Explorer 不全地址扫描，不把连续滚动变成无界 queued ReadMemEx。
 - Peripheral memory 不做后台扫描/大范围 speculative prefetch。
 - Scope Raw/Display 分离保持不变。
+
+### V0.5.5 Presentation / Watch Commit
+
+```text
+Memory Symbol/Hex divider drag
+        ↓
+local symbol_width_px
+        ↓
+column geometry + horizontal scrollbar + repaint
+        ↓
+NO AXF parse / NO J-Link I/O
+```
+
+```text
+Watch Set Value textEdited
+        ↓ dirty=true
+Enter OR focus-out(editingFinished)
+        ↓ dirty guard / commitData
+QTable item committed
+        ↓ next event-loop turn
+write_requested(row_id)
+        ↓
+Single JLinkWorker → WriteMemEx
+```
+
+未发生 `textEdited` 的 focus-out 不产生写请求；dirty 在首次 commit 前清零，防止 Return 与 editingFinished 对同一次编辑重复触发。

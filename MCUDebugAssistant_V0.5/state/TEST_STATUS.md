@@ -1,5 +1,15 @@
 # TEST_STATUS
 
+### V0.5.5
+- compileall: PASS
+- pytest: 63 passed
+- Memory Symbol resize/persistence static regression: PASS
+- Watch Set Value Enter/focus-out dirty commit static regression: PASS
+- Qt GUI Runtime Smoke: PENDING_ENVIRONMENT (PySide6 unavailable)
+- Real J-Link Set Value focus-out write: PENDING_HARDWARE
+- Real Windows Symbol drag-resize: PENDING_HARDWARE
+
+
 ## Automated
 ### V0.5.4
 - User-reproduced popup symptom: VERIFIED_USER_HARDWARE (header-only/too-short candidate popup)

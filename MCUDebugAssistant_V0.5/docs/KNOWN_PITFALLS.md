@@ -22,7 +22,7 @@
 19. `WriteMemEx` 成功与“回读验证相等”是两种语义。V0.5 默认前者；不要无需求重新给所有写入附加 ReadMemEx。
 20. AXF/ELF 符号可能与 DWARF container/member 重叠；Memory 显示优先精确 DWARF scalar/member，不要按名称随意选第一个符号。
 
-21. Memory Symbol 一行拼多个长名称会破坏列对齐并覆盖 Hex；固定 Symbol 列宽，每行只显示最相关项并 elide。
+21. Memory Symbol 一行拼多个长名称会破坏列对齐并覆盖 Hex；保持单一对齐 Symbol 列，每行只显示最相关项并 elide；列宽允许用户拖动调整。
 22. Memory Explorer 直接键入后再弹第二个确认框会破坏 CE 式编辑体验；direct edit 立即写，双击弹窗的 OK 即确认。
 23. Text pane 点击不能退化成 row base；必须按字符/编码单元映射到具体 byte address，否则文本输入会写错位置。
 24. 只支持单 cell copy 不够用于内存分析；拖动/Shift range selection 与批量 Hex/Text clipboard 是 Memory Explorer 基础能力。
@@ -32,3 +32,6 @@
 
 
 25. 自定义多列 `QCompleter + QTreeView` 在部分 Windows/Qt 样式下可能按未稳定的 row size hint 把 popup 压成 header-only；Memory Symbol 候选 popup 需要稳定最小高度。
+
+26. Memory Symbol 列宽完全固定会让长 AXF/DWARF 路径只能看到省略文本；允许拖动列边界，但 resize 热路径只能重算本地几何/重绘，不能触发符号解析或目标读取。
+27. Watch Set Value 只绑定 `returnPressed` 会造成“输入后点击别处，UI 提交但 MCU 未写”的语义 Bug；用 dirty + editingFinished/Enter 统一提交，并防止双发。

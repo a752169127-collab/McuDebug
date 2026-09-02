@@ -99,6 +99,11 @@ class HexMemoryView(QAbstractScrollArea):
         self._show_symbols = True
         self._show_symbol_offsets = True
         self._show_changes = True
+        # CE-style Symbol column width is user-resizable by dragging its right
+        # separator. Keep this as presentation state only; it never affects
+        # symbol lookup or target memory reads. None means the 32-char default.
+        self._symbol_width_px: int | None = None
+        self._resizing_symbol_column = False
         self._symbol_index = SymbolIndex()
         self._connected = False
 
@@ -180,6 +185,7 @@ class HexMemoryView(QAbstractScrollArea):
             "show_symbols": self._show_symbols,
             "show_symbol_offsets": self._show_symbol_offsets,
             "show_changes": self._show_changes,
+            "symbol_width_px": self._symbol_width_px,
         }
 
     def load_settings_state(self, state: dict) -> None:
@@ -195,6 +201,11 @@ class HexMemoryView(QAbstractScrollArea):
         self._show_symbols = bool(state.get("show_symbols", True))
         self._show_symbol_offsets = bool(state.get("show_symbol_offsets", True))
         self._show_changes = bool(state.get("show_changes", True))
+        saved_symbol_width = state.get("symbol_width_px")
+        try:
+            self._symbol_width_px = int(saved_symbol_width) if saved_symbol_width is not None else None
+        except (TypeError, ValueError):
+            self._symbol_width_px = None
         self._update_scrollbars()
         self.viewport().update()
 
@@ -273,9 +284,14 @@ class HexMemoryView(QAbstractScrollArea):
         hscroll = self.horizontalScrollBar().value()
         address_x = 6 - hscroll
         address_w = cw * 11
-        # Fixed character geometry keeps every Symbol row aligned. Long names
-        # are elided rather than painted into the value area.
-        symbol_w = cw * 32 if self._show_symbols else 0
+        # Symbol stays a single aligned column, but unlike the V0.5.1 fixed
+        # width it can now be resized like a real table column. Long names are
+        # still elided inside the chosen width and never paint over Hex values.
+        default_symbol_w = cw * 32
+        min_symbol_w = cw * 12
+        max_symbol_w = cw * 120
+        configured_symbol_w = default_symbol_w if self._symbol_width_px is None else int(self._symbol_width_px)
+        symbol_w = max(min_symbol_w, min(max_symbol_w, configured_symbol_w)) if self._show_symbols else 0
         symbol_x = address_x + address_w
         values_x = symbol_x + symbol_w
 
@@ -542,6 +558,24 @@ class HexMemoryView(QAbstractScrollArea):
 
         painter.end()
 
+    def _symbol_resize_hit(self, x: int) -> bool:
+        if not self._show_symbols:
+            return False
+        _address_x, _address_w, symbol_x, symbol_w, _values_x, _text_x, _total_w = self._column_geometry()
+        divider_x = symbol_x + symbol_w - 3
+        return abs(int(x) - divider_x) <= 5
+
+    def _resize_symbol_column_to(self, x: int) -> None:
+        if not self._show_symbols:
+            return
+        cw = self._char_width()
+        _address_x, _address_w, symbol_x, _symbol_w, _values_x, _text_x, _total_w = self._column_geometry()
+        width = int(x) - symbol_x + 3
+        self._symbol_width_px = max(cw * 12, min(cw * 120, width))
+        self._cancel_inline_editor()
+        self._update_scrollbars()
+        self.viewport().update()
+
     # ---------- hit testing / interaction ----------
     def _hit_test_position(self, x: int, y: int) -> tuple[int, int, str] | None:
         row_h = self._row_height()
@@ -577,7 +611,15 @@ class HexMemoryView(QAbstractScrollArea):
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
-            hit = self._hit_test_position(int(event.position().x()), int(event.position().y()))
+            x = int(event.position().x())
+            if self._symbol_resize_hit(x):
+                self._resizing_symbol_column = True
+                self._drag_selecting = False
+                self._cancel_inline_editor()
+                self.viewport().setCursor(Qt.CursorShape.SizeHorCursor)
+                event.accept()
+                return
+            hit = self._hit_test_position(x, int(event.position().y()))
             if hit is not None:
                 address, size, area = hit
                 if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
@@ -594,8 +636,18 @@ class HexMemoryView(QAbstractScrollArea):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        x = int(event.position().x())
+        if self._resizing_symbol_column and event.buttons() & Qt.MouseButton.LeftButton:
+            self._resize_symbol_column_to(x)
+            self.viewport().setCursor(Qt.CursorShape.SizeHorCursor)
+            event.accept()
+            return
+        if self._symbol_resize_hit(x):
+            self.viewport().setCursor(Qt.CursorShape.SizeHorCursor)
+        else:
+            self.viewport().unsetCursor()
         if self._drag_selecting and event.buttons() & Qt.MouseButton.LeftButton:
-            hit = self._hit_test_position(int(event.position().x()), int(event.position().y()))
+            hit = self._hit_test_position(x, int(event.position().y()))
             if hit is not None:
                 address, size, area = hit
                 if area == self._selection_area:
@@ -608,11 +660,26 @@ class HexMemoryView(QAbstractScrollArea):
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
+            if self._resizing_symbol_column:
+                self._resizing_symbol_column = False
+                if self._symbol_resize_hit(int(event.position().x())):
+                    self.viewport().setCursor(Qt.CursorShape.SizeHorCursor)
+                else:
+                    self.viewport().unsetCursor()
+                event.accept()
+                return
             self._drag_selecting = False
         super().mouseReleaseEvent(event)
 
     def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
+            if self._symbol_resize_hit(int(event.position().x())):
+                # Double-clicking the divider restores the practical default.
+                self._symbol_width_px = None
+                self._update_scrollbars()
+                self.viewport().update()
+                event.accept()
+                return
             hit = self._hit_test_position(int(event.position().x()), int(event.position().y()))
             if hit is not None:
                 address, size, area = hit
@@ -1051,6 +1118,9 @@ class HexMemoryView(QAbstractScrollArea):
 
     def _set_show_symbols(self, enabled: bool) -> None:
         self._show_symbols = bool(enabled)
+        if not self._show_symbols:
+            self._resizing_symbol_column = False
+            self.viewport().unsetCursor()
         self._update_scrollbars()
         self.viewport().update()
 

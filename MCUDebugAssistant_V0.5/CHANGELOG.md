@@ -1,3 +1,22 @@
+# V0.5.5 — Memory Symbol Resize + Watch Commit Fix
+
+## Fixed
+- Memory Symbol 列不再固定 32 字符宽；可拖动 Symbol/Hex 之间的分隔线自由调整，解决长变量名被 elide 后无法展开查看的问题。
+- Watch `Set Value` 输入后如果不按 Enter、直接点击其它位置，现会先提交编辑内容再走既有 WriteMemEx 写路径；不再出现表格值看似改了但 MCU 未写入。
+
+## Interaction / Performance
+- Symbol resize 只改变绘制几何和横向滚动范围，不重新解析 AXF、不访问 J-Link。
+- Set Value focus-out 只对 `textEdited` 标记过的编辑器触发；Enter + editingFinished 使用 dirty guard 去重，避免一次编辑重复写两次。
+- V0.5.4 Symbol completion、本地 MatchContains、V0.4.23 Scope 性能链保持不变。
+
+## Verification
+- `python -m compileall -q .`: PASS
+- `pytest -q`: 63 passed
+- Windows/PySide6 resize interaction: PENDING_USER_HARDWARE
+- Real J-Link Set Value focus-out write: PENDING_USER_HARDWARE
+
+---
+
 # V0.5.4 — Symbol Completion Popup Fix
 
 ## Fixed

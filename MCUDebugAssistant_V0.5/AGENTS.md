@@ -88,6 +88,10 @@ Display 才使用：
 - `Follow`：只控制 X 轴跟随，不每帧自动改变 Y。
 - `View All`：明确查看整个缓存。
 
+### Watch Set Value 提交语义
+- Set Value 用户实际编辑后，按 Enter 或编辑器因点击其它位置失焦都必须提交并写入。
+- focus-out 不能对未修改的单元格产生写操作；Enter 与 editingFinished 必须去重，禁止一次编辑重复写两次。
+
 ### AXF Reload / Startup Auto-load
 - 按完整 Symbol Path 重新绑定。
 - 更新 Address / Type。
@@ -101,7 +105,7 @@ Display 才使用：
 - Peripheral Space 禁止自动大范围预读；用户看哪里才读哪里。
 - 滚动必须 debounce/合并，禁止每个 scrollbar tick 无界排队 J-Link 读取。
 - 新会话默认从 MCU SRAM 基址 `0x20000000` 打开；不要恢复上次随机浏览地址覆盖首次有用视图。
-- Symbol 列必须保持固定列几何、单行对齐和 elide；禁止把多个长符号用自由文本拼接后覆盖 Hex 区。
+- Symbol 列必须保持单行对齐和 elide；列右边界允许用户拖动调整宽度，禁止把多个长符号用自由文本拼接后覆盖 Hex 区。调整列宽仅属于 Presentation，不得触发 AXF 重解析或 J-Link 读取。
 - Address / Symbol 输入框的符号搜索必须基于 AXF 加载时一次构建的本地 Model/Index；每次键入不得重建 Symbol UI、不得触发 J-Link 读取。完整成员路径和数组路径（如 `obj.member`、`buffer[1]`）必须直接解析到已加载符号地址。
 - 支持 CE 风格直接编辑：Byte 区两位 Hex 直接写、Text 区键入/粘贴直接写、拖动/Shift 选择连续内存块并复制。
 - 双击编辑弹窗的 OK 本身就是确认；Memory Explorer 直接编辑路径禁止再叠加第二个确认框。手工 Typed R/W 面板可保留独立确认。

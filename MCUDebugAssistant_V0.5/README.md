@@ -1,6 +1,12 @@
-# MCU Debug Assistant V0.5.4 — Symbol Completion Popup Fix
+# MCU Debug Assistant V0.5.5 — Memory Symbol Resize + Watch Commit Fix
 
-V0.5.4 基于 V0.5.3，修复 Memory `Address / Symbol` 候选下拉框在 Windows/Qt 下高度过短、只有表头而看不到真实匹配变量的问题；符号解析与本地过滤逻辑不变。
+V0.5.5 基于 V0.5.4，修复 Memory Symbol 列宽无法调整，以及 Watch Set Value 输入后点击其它位置不触发写入的问题；保持现有 AXF 搜索、Memory visible-window、单 J-Link Owner 和 Scope 高性能架构不变。
+
+## V0.5.5 重点
+- Memory Symbol 列右边界可直接鼠标拖动调整宽度，长变量名需要时可以展开查看；双击分隔线恢复默认宽度。
+- Symbol 列宽会跟随 Memory Explorer 设置持久化，下次启动继续使用。
+- Watch `Set Value`：输入后按 Enter 会写；输入后直接点击其它单元格/控件也会提交并写入 MCU。
+- 只有用户实际编辑过 Set Value 才在 focus-out 触发写入，避免单纯浏览/切换焦点产生重复写操作。
 
 ## V0.5.4 重点
 

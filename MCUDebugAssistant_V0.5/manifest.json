@@ -4,6 +4,6 @@
   "agent_process": "AGENTS.md",
   "project_skill": "SKILL.md",
   "workflow": "WORKFLOW.md",
-  "current_context_version": "V0.5.4",
+  "current_context_version": "V0.5.5",
   "purpose": "closed-loop AI secondary development with durable state and automatic engineering handoff"
 }

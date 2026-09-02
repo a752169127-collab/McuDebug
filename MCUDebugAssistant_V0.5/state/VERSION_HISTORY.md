@@ -1,5 +1,7 @@
 # VERSION_HISTORY
 
+- V0.5.5 — Memory Symbol Resize + Watch Commit Fix: draggable/persisted Memory Symbol column width and Set Value write-on-focus-out with dirty/duplicate guards.
+
 - V0.5.4 — Symbol Completion Popup Fix: fixes user-reproduced header-only/too-short multi-column QCompleter popup by enforcing a stable visible height, while preserving local MatchContains filtering and zero target I/O per keystroke.
 
 - V0.1.x — J-Link connect, memory R/W, device selection.

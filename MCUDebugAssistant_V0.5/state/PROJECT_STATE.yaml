@@ -1,9 +1,10 @@
 project: MCU Debug Assistant
 state_schema: 1
-current_version: V0.5.4
+current_version: V0.5.5
 version_status: "VERIFIED_AUTOMATED / PENDING_QT_SMOKE / PENDING_HARDWARE"
 main_branch_focus:
-  - "validate V0.5.4 Symbol completion popup height/visibility on real Windows/PySide6"
+  - "validate Watch Set Value focus-out commit/write on real J-Link hardware"
+  - "validate V0.5.5 Memory Symbol column drag-resize and persisted width on real Windows/PySide6"
   - "verify array/member paths such as buffer[1] and struct.member resolve to the expected real AXF/DWARF addresses"
   - "continue V0.5.1 Memory interaction hardware checks and V0.5.2 startup AXF auto-load validation"
   - "continue V0.4.23 Scope RUN-mode hardware validation without reopening old diagnostics"
@@ -23,8 +24,16 @@ validated:
   - "V0.5.2 saved-symbol startup auto-load static regression"
   - "V0.5.3 local symbol-name index, array/member exact-name resolution, and model-backed completion static regression"
   - "V0.5.4 stable completion-popup geometry regression"
+  - "V0.5.5 Symbol column resize/persistence static regression"
+  - "V0.5.5 Watch Set Value dirty focus-out commit static regression"
 
 open_issues:
+  - id: FIX-MEMORY-SYMBOL-WIDTH-V055
+    status: CODE_COMPLETE / PENDING_USER_HARDWARE
+    severity: medium
+  - id: FIX-WATCH-SETVALUE-FOCUSOUT-V055
+    status: CODE_COMPLETE / PENDING_USER_HARDWARE
+    severity: high
   - id: FIX-MEMORY-SYMBOL-POPUP-V054
     status: CODE_COMPLETE / PENDING_USER_HARDWARE
     severity: high
@@ -51,7 +60,7 @@ open_issues:
     severity: medium
 
 latest_context:
-  automated_environment: "Python available; compileall PASS; pytest 59 passed"
+  automated_environment: "Python available; compileall PASS; pytest 63 passed"
   qt_smoke: "PENDING_ENVIRONMENT: PySide6 unavailable in current execution environment"
   debugger: none
-  note: "V0.5.4 fixes the user-reproduced custom QCompleter/QTreeView popup collapsing to header-only height; local symbol filtering and target-I/O semantics are unchanged. Runtime confirmation of visible candidate rows remains user-hardware validation."
+  note: "V0.5.5 makes Memory Symbol width user-resizable without target I/O and fixes Watch Set Value focus-out commit semantics. Real Windows/J-Link confirmation remains pending."
