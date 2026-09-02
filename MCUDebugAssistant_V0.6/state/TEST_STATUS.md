@@ -1,3 +1,30 @@
+### V0.6.6
+- `python -m compileall -q .`: PASS
+- full `pytest -q`: **97 passed**
+- Symbol display type normalization pure-core regression: PASS
+- Memory history History/Type/Address three-column static regression: PASS
+- Symbol navigation applies datatype before goto static regression: PASS
+- History metadata refresh after AXF reload/no-target-I/O static regression: PASS
+- Windows/PySide6 popup visual/selection smoke: **PENDING_USER_QT_SMOKE**
+- Real AXF + J-Link typed Symbol navigation: **PENDING_HARDWARE**
+- Result: `VERIFIED_AUTOMATED` for core/static behavior
+
+### V0.6.5
+- `python -m compileall -q .`: PASS
+- full `pytest -q`: **93 passed**
+- PySide6 QComboBox activated(int) static regression: added
+- User Windows/PySide6 startup + history click: **PENDING_USER_QT_SMOKE**
+- Real AXF + J-Link history navigation: **PENDING_HARDWARE**
+- Result: `VERIFIED_AUTOMATED` for the Qt6 signal-binding regression; real GUI startup remains pending user smoke
+
+### V0.6.4
+- `python -m compileall -q .`: PASS
+- full `pytest -q`: **91 passed**
+- `test_memory_navigation_history_v064.py`: PASS — MRU ordering/dedup/bounds, canonical address history, editable combo/static persistence wiring, no target I/O in history activation path
+- Qt editable-combo + AXF QCompleter coexistence smoke: **PENDING_ENVIRONMENT** — PySide6 unavailable in current execution environment
+- Real AXF + J-Link history select/restart/clear behavior: **PENDING_HARDWARE**
+- Result: `VERIFIED_AUTOMATED` for pure-core/static V0.6.4 behavior
+
 ### V0.6.3
 - `python -m compileall -q .`: PASS
 - full `pytest`: **87 passed**

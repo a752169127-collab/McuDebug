@@ -182,3 +182,32 @@ Result Table → headers + rows → TAB columns / LF rows → QApplication clipb
 ```
 
 这样避免每轮测试都弹文件保存对话框，同时保持结果表与 Excel 的直接二维映射。Run/Runtime 表仍属于瞬时执行视图，全部 Case 完成后清空。
+
+
+## V0.6.4 Memory Navigation History
+```text
+AXF/ELF load -> Symbol Completion Model (static while typing)
+                               |
+Address/Symbol editable combo -+-> successful Go -> MRU History -> QSettings
+          |                                    |
+          +-> history dropdown ----------------+-> existing _goto() -> Memory View
+```
+History is presentation/navigation state only; it never owns J-Link reads and never replaces the SymbolIndex.
+
+
+## V0.6.5 PySide6 / Qt6 Combo Signal Compatibility
+Memory navigation history remains a small editable `QComboBox` MRU independent of the large AXF/DWARF completer. In the supported PySide6/Qt6 path, history activation uses `QComboBox.activated(int)` and resolves the selected query through `itemText(index)`. Do not use `activated[str]` for QComboBox; on the user's binding that signature does not exist and crashes during page construction.
+
+
+## V0.6.6 Symbol Typed Memory Navigation
+```text
+Address/Symbol History MRU --------------------> QTreeView popup
+         |                                      History | Type | Address
+         |
+AXF/ELF/DWARF -> SymbolIndex -> exact scalar type
+         |                         |
+         |                         +-> Memory Display Type (local UI only)
+         |
+         +----------------------------> goto_address -> visible-range ReadMemEx
+```
+The history popup resolves Type/Address locally from the latest SymbolIndex and refreshes on AXF reload. Typed navigation changes only presentation before the normal visible-range read; it never adds a second target read. Unsupported/container types and raw addresses preserve the user's current display type.

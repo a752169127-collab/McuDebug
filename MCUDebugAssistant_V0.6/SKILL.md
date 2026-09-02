@@ -265,3 +265,21 @@ V0.4 主线从“功能堆叠”转为“Rendering V2 + Release 热路径收敛�
 - 必须用高频 persistent timer 才能稳定展示（该方向源自 debugger 阶段现象，V0.4.23 改回更低唤醒的一帧一回调策略）
 
 需要新的 Release/RUN 证据才允许重开。
+
+### V0.6.4 Memory Navigation History 基线
+- `Address / Symbol` 使用 editable QComboBox，编辑区保持 V0.5.x 的 320~520 px 尺寸；下拉内容是成功导航的 MRU 历史。
+- AXF/DWARF QCompleter 仍使用一次构建的本地 Symbol Model，历史下拉与符号搜索模型分离，键入不访问 J-Link。
+- 地址历史规范化为 `0xXXXXXXXX`；Symbol 历史保存完整解析名称；去重置顶，最多 50 条并持久化。
+- `Clear History` 只清查询历史，不改变当前首屏/地址，不触发 ReadMemEx。
+
+### V0.6.5 PySide6 Combo Signal 兼容基线
+- Memory Address/Symbol 历史 `QComboBox` 在 PySide6/Qt6 下使用 `activated(int)`；禁止使用当前绑定不存在的 `activated[str] / activated(QString)`。
+- 历史点击通过 index → `itemText(index)` 取查询文本，再复用 `_goto()`；不得为此增加 J-Link I/O、重建 AXF Symbol Model 或改变 MRU 语义。
+- 构造阶段异常导致的 `QThread: Destroyed while thread is still running` 优先视为上游初始化异常的级联结果；先修第一个 traceback，不把级联提示误判成独立线程根因。
+
+
+### V0.6.6 Symbol Typed Memory Navigation 基线
+- Memory MRU popup: History / Type / Address；编辑框仍为 320~520 px。
+- Type/Address 来自最新 SymbolIndex，本地刷新，无 J-Link I/O。
+- Symbol/member 精确标量跳转会先采用其 AXF/DWARF type 作为 Memory display type，例如 `uint8 -> UInt8`、`float -> Float`。
+- raw address、array、struct、unknown 不自动改变 display type。

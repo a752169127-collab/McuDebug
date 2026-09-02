@@ -1,9 +1,9 @@
 project: MCU Debug Assistant
 state_schema: 1
-current_version: V0.6.3
+current_version: V0.6.6
 version_status: "VERIFIED_AUTOMATED / PENDING_QT_SMOKE / PENDING_HARDWARE"
 main_branch_focus:
-  - "validate V0.6.3 persistent Results, Avg/Min/Max default SAMPLE, clipboard-to-Excel and manual Clear Results with a real AXF + J-Link target"
+  - "validate V0.6.6 Memory History/Type/Address popup plus automatic typed Symbol navigation on user PySide6 + real AXF/J-Link"
   - "validate multi-signal WAIT STABLE, timeout actions, SAMPLE statistics, and manual external measurement on hardware"
   - "validate Parameter Matrix enumeration with short RPM lists/ranges before long sweeps"
   - "keep V0.5.5 Memory/Watch fixes under regression while Automation is introduced"
@@ -29,10 +29,22 @@ validated:
   - "V0.6.1 recursive StepDialog layout cleanup static regression"
   - "V0.6.2 explicit result projection / Runtime separation static regression"
   - "V0.6.3 Avg/Min/Max default SAMPLE + persistent Results + TSV clipboard + explicit clear static regression"
+  - "V0.6.4 Memory Address/Symbol MRU history pure/static regression"
+  - "V0.6.5 PySide6 QComboBox activated(int) compatibility static regression"
+  - "V0.6.6 Memory history Type/Address metadata + scalar Symbol auto-display-type static/core regression"
   - "V0.6.2 completed-run Runtime cleanup + Results auto-switch static regression"
   - "V0.6.0 Test Automation UI/MainWindow/JLinkWorker static architecture regression"
 
 open_issues:
+  - id: UX-MEMORY-SYMBOL-TYPED-NAV-V066
+    status: CODE_COMPLETE / PENDING_USER_QT_SMOKE / PENDING_HARDWARE
+    severity: medium
+  - id: FIX-MEMORY-HISTORY-QT6-SIGNAL-V065
+    status: CODE_COMPLETE / PENDING_USER_QT_SMOKE
+    severity: high
+  - id: FEAT-MEMORY-NAV-HISTORY-V064
+    status: CODE_COMPLETE / PENDING_QT_SMOKE / PENDING_HARDWARE
+    severity: medium
   - id: UX-AUTOMATION-RESULT-HISTORY-V063
     status: CODE_COMPLETE / PENDING_QT_SMOKE / PENDING_HARDWARE
     severity: medium
@@ -68,9 +80,9 @@ open_issues:
     severity: medium
 
 latest_context:
-  automated_environment: "Python available; compileall PASS; pytest 87 passed"
+  automated_environment: "Python available; compileall PASS; pytest 97 passed"
   qt_smoke: "PENDING_ENVIRONMENT: PySide6 unavailable in current execution environment"
   hardware: "PENDING_HARDWARE: real AXF/J-Link Test Automation execution not run here"
   external_instruments: "V0.6.3 uses MANUAL INPUT; PF300/VT650 automatic adapters are future work"
   debugger: none
-  note: "V0.6.3 keeps Runtime separate, defaults SAMPLE results to Avg/Min/Max, accumulates Results across runs, copies TSV directly to Excel, and only clears results explicitly."
+  note: "V0.6.6 adds local history Type/Address metadata and exact scalar Symbol-driven Memory display typing while preserving the V0.6.5 Qt6 combo fix, MRU/completer and single-owner architecture."

@@ -77,6 +77,51 @@ def parse_address(text: str) -> int:
     return address
 
 
+def update_navigation_history(
+    history: Sequence[str],
+    query: str,
+    *,
+    max_items: int = 50,
+) -> list[str]:
+    """Return MRU Memory Address/Symbol history after a successful navigation.
+
+    Numeric addresses are normalized to canonical 32-bit hex. Symbol/member
+    paths retain the spelling selected from AXF/DWARF. Duplicate entries are
+    moved to the front rather than appended again. This helper is pure so the
+    UI can persist history without coupling search typing to target I/O.
+    """
+    text = str(query).strip()
+    if not text:
+        return [str(item) for item in history if str(item).strip()][:max(0, int(max_items))]
+    if max_items <= 0:
+        return []
+    try:
+        text = f"0x{parse_address(text):08X}"
+    except ValueError:
+        pass
+    key = text.casefold()
+    result = [text]
+    for item in history:
+        value = str(item).strip()
+        if not value or value.casefold() == key:
+            continue
+        result.append(value)
+        if len(result) >= max_items:
+            break
+    return result
+
+
+def symbol_display_type(type_name: str | None) -> str | None:
+    """Return the Memory display type implied by an exact scalar symbol.
+
+    AXF/DWARF scalar types are already normalized to the datatype names used by
+    Watch/Scope (uint8/int16/float/...). Containers/arrays or unknown types are
+    intentionally ignored so symbolic navigation never guesses a view format.
+    """
+    text = str(type_name or "").strip()
+    return text if text in supported_types() else None
+
+
 def display_unit_size(display_type: str) -> int:
     if display_type == "byte":
         return 1

@@ -1,47 +1,9 @@
 {
-  "schema": 1,
-  "name": "测试用例",
-  "combination": "cartesian",
-  "parameters": [
-    {
-      "end": 2000.0,
-      "name": "SetRef",
-      "source": "range",
-      "start": 1000.0,
-      "step": 200.0,
-      "values": "10, 20, 30"
-    }
-  ],
-  "steps": [
-    {
-      "kind": "SET",
-      "variable": "BlowerParamsObj.m_TrapezoidDelayPos",
-      "value": "${SetRef}"
-    },
-    {
-      "kind": "WAIT",
-      "duration_s": 3.0
-    },
-    {
-      "kind": "SAMPLE",
-      "variables": [
-        "BlowerParamsObj.m_Position",
-        "BlowerParamsObj.m_TrapezoidDelayPos"
-      ],
-      "duration_s": 3.0,
-      "interval_ms": 100
-    },
-    {
-      "kind": "MANUAL_INPUT",
-      "fields": [
-        {
-          "name": "Pressure",
-          "unit": "cmH2O"
-        }
-      ]
-    },
-    {
-      "kind": "SAVE_RESULT"
-    }
-  ]
+  "name": "MCUDebugAssistant AI Development Agent",
+  "entrypoint": "START_HERE_FOR_NEW_AI.md",
+  "agent_process": "AGENTS.md",
+  "project_skill": "SKILL.md",
+  "workflow": "WORKFLOW.md",
+  "current_context_version": "V0.6.6",
+  "purpose": "closed-loop AI secondary development for MCU runtime debugging, observability, memory exploration, and no-code test automation"
 }

@@ -69,3 +69,11 @@ V0.6.0 为确定时序，在 Test Run 启动时停止 Watch/Scope 连续采样�
 
 ### 不要在 Run Start 隐式清空 Results
 Results 是跨多次测试运行累积的用户数据。新 Run 只能清理运行态/Case 状态，不得 `self._results.clear()`。清空必须由 Results 页 `Clear Results` 明确触发并确认。复制给 Excel 应使用 TSV，不要为了复制再创建临时 CSV 文件。
+
+
+### Memory query history must not become a second Symbol search model
+History is a small MRU of successful navigation strings. Do not repopulate it on each keypress and do not merge thousands of AXF symbols into the combo model; QCompleter remains the dedicated local Symbol filter.
+
+
+## Symbol navigation type guessing
+Do not guess a Memory display datatype from arbitrary addresses, object size, struct/array containers, or stale history metadata. Only an exact current AXF/DWARF scalar `type_name` that is supported by `core.datatype` may auto-switch the Memory display type.

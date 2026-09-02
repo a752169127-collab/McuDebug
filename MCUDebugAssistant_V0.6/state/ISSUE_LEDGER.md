@@ -1,5 +1,42 @@
 # ISSUE_LEDGER
 
+## UX-MEMORY-SYMBOL-TYPED-NAV-V066
+Status: CODE_COMPLETE / PENDING_USER_QT_SMOKE / PENDING_HARDWARE
+Severity: medium
+
+### User request
+Memory Address/Symbol 查询历史除了 Symbol/地址外还需要显示成员类型；跳转到 AXF/DWARF 标量成员时，Memory 内存值显示应第一次就采用该变量类型，例如 `uint8` 自动切换成 `UInt8`，而不是仍保持 Byte Hex。
+
+### Design / Fix
+- 历史仍使用独立小型 MRU，不污染 AXF Completion Model；popup 改为 History / Type / Address 三列，编辑框 320~520 px 尺寸不变。
+- Type/Address 元数据从当前 SymbolIndex 本地解析，AXF reload 后刷新；无 ReadMemEx/WriteMemEx。
+- `_goto_symbol()` 对受支持的 exact scalar `type_name` 先应用 Memory display type，再 goto 地址；struct/array/unknown 与纯数值地址不猜类型。
+
+### Verification
+- compileall: PASS
+- full pytest: 97 passed
+- symbol datatype helper + static typed-navigation/history regression: PASS
+- Windows/PySide6 three-column history popup visual smoke: PENDING_USER_QT_SMOKE
+- Real AXF/J-Link `uint8/int16/float` jump display: PENDING_HARDWARE
+
+## FIX-MEMORY-HISTORY-QT6-SIGNAL-V065
+Status: CODE_COMPLETE / PENDING_USER_QT_SMOKE
+Severity: high
+
+### User evidence / symptom
+V0.6.4 crashes during `MemoryExplorerPage` construction with `IndexError: Signature "activated(QString)" not found for signal: "activated". Available candidates: "activated(int)"`. A `QThread: Destroyed while thread ... is still running` message follows process teardown.
+
+### Root Cause
+The V0.6.4 history combo used PyQt/older-overload style `self.address_combo.activated[str]`. In the user's PySide6/Qt6 binding, QComboBox exposes `activated(int)` and does not provide `activated(QString)` under that signal name. The constructor therefore throws before the window finishes building.
+
+### Fix
+Connect `self.address_combo.activated` to an integer-index handler. Resolve the selected history text with `itemText(index)` and reuse the existing `_goto()` path. No new target I/O or Symbol model rebuild is added.
+
+### Verification
+- compileall/pytest: see V0.6.5 TEST_STATUS
+- user Windows/PySide6 startup: PENDING_USER_QT_SMOKE
+- real history selection with AXF/J-Link: PENDING_HARDWARE
+
 ## UX-AUTOMATION-RESULT-HISTORY-V063
 Status: CODE_COMPLETE / PENDING_QT_SMOKE / PENDING_HARDWARE
 Severity: medium
@@ -522,3 +559,10 @@ requested 1000Hz, actual ~496–499Hz
 with GD32F425RG, SWD6000kHz, J-Link DLL V8.10, 3 channels.
 
 Do not confuse acquisition throughput with GUI display reduction.
+
+
+## FEAT-MEMORY-NAV-HISTORY-V064
+- Status: CODE_COMPLETE / PENDING_QT_SMOKE / PENDING_HARDWARE
+- Request: remember successful Memory Symbol/address queries, show them in a same-size editable dropdown, allow explicit clear.
+- Acceptance: MRU persisted; symbol/address selectable; duplicate-safe; clear does not alter current address; no J-Link I/O while typing/opening history.
+- Implementation: editable QComboBox + existing QCompleter + pure MRU helper.

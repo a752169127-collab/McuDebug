@@ -36,7 +36,7 @@ Parameter Matrix → Generated Cases → No-code Workflow → JLinkWorker Runtim
 - ARMCC5 DWARF3：当前场景成熟
 - Scope Rendering V2：V0.4.23 基线保持
 - V0.5.5 Memory Explorer：Symbol-aware CE 风格内存浏览/编辑基线保持
-- V0.6.3 Test Automation Studio：Parameter Matrix + 精简通用 Workflow + 稳态/统计/人工测量；Runtime Context 与 Results 分离，SAMPLE 默认输出 Avg/Min/Max，Std 可选，Count 保持内部；Results 跨多次 Run 累积，一键复制 TSV 到 Excel，显式 Clear 才清空。
+- V0.6.5 Test Automation Studio：Parameter Matrix + 精简通用 Workflow + 稳态/统计/人工测量；Runtime Context 与 Results 分离，SAMPLE 默认输出 Avg/Min/Max，Std 可选，Count 保持内部；Results 跨多次 Run 累积，一键复制 TSV 到 Excel，显式 Clear 才清空。
 
 ## V0.5.5 Memory / Watch 原则
 - GUI 不直接访问 J-Link。
@@ -62,3 +62,7 @@ Parameter Matrix → Generated Cases → No-code Workflow → JLinkWorker Runtim
 - 外部仪器 V0.6.0 通过 Manual Input；PF300/VT650 等自动读取应以 Measurement Adapter 扩展，不修改 Test Engine。
 - 不执行任意用户脚本；`${Name}` Token、结构化 Calculate、Assert 是当前表达能力边界。
 
+
+- V0.6.5: Memory Address/Symbol keeps the V0.6.4 persistent MRU history and fixes PySide6/Qt6 combo activation by using `activated(int)` + `itemText(index)`; Symbol completion remains local/non-blocking.
+
+- V0.6.6: Memory navigation history shows History/Type/Address metadata; exact scalar AXF/DWARF Symbol/member jumps automatically apply the matching Memory display type before navigation, while raw addresses/non-scalars preserve the current view.

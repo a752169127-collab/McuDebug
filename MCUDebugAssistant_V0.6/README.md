@@ -1,9 +1,12 @@
-# MCU Debug Assistant V0.6.3 — Test Automation Studio
+# MCU Debug Assistant V0.6.6 — Test Automation Studio + Typed Memory Navigation
 
 V0.6.x 在 V0.5.5 的 **Watch + Scope + Symbol-aware Memory Explorer** 基础上新增第一版无代码 **Test Automation Studio**。目标不是让用户写 Python/YAML，而是通过参数矩阵和可配置 Workflow，把 MCU 运行时变量读写、稳态判断、统计、人工测量和结果导出编排成自动测试用例。
 
-## V0.6.3 重点
+## V0.6.6 重点
 
+- Memory `Address / Symbol` 历史下拉升级为 `History / Type / Address` 三列，编辑框尺寸保持 320~520 px 不变。
+- Symbol/成员跳转时，如果 AXF/DWARF 提供受支持的标量类型，Memory Display Type 会立即自动切换到该类型；例如 `uint8 -> UInt8`、`float -> Float`。
+- 原始数值地址或 struct/array/unknown 类型不做类型猜测，继续保持当前 Memory Display Type。
 - Workflow 新建步骤精简为：`SET / WAIT / WAIT STABLE / SAMPLE / MANUAL INPUT / SAVE RESULT`。
 - 修复 Step Type 反复切换后旧表单 Label/Layout 残留导致的字体/文字重叠。
 - V0.6.0 的 `WAIT UNTIL / CALCULATE / ASSERT` 仅为旧 Test Plan 兼容保留，不再出现在新建步骤列表。
@@ -73,10 +76,20 @@ run.bat
 
 ## 当前验证状态
 - `python -m compileall -q .`: PASS
-- `pytest -q`: 87 passed
+- `pytest -q`: 97 passed
 - Test Automation pure-core / static integration regression: PASS
 - Qt Runtime Smoke: `PENDING_ENVIRONMENT`（当前执行环境无 PySide6）
 - Real AXF + J-Link Automation run: `PENDING_HARDWARE`
-- External instrument automatic acquisition: **not implemented in V0.6.3**，当前使用 `MANUAL INPUT`。
+- External instrument automatic acquisition: **not implemented in V0.6.6**，当前使用 `MANUAL INPUT`。
 
-详细状态见 `state/TEST_STATUS.md`、`state/LATEST_HANDOFF.md`、`RELEASE_REPORT_V0.6.3.md`。
+详细状态见 `state/TEST_STATUS.md`、`state/LATEST_HANDOFF.md`、`RELEASE_REPORT_V0.6.6.md`。
+
+
+
+## V0.6.5 PySide6 Combo Signal Compatibility
+- 修复 Memory Address/Symbol 历史下拉在 PySide6/Qt6 启动阶段崩溃：`QComboBox.activated` 在当前绑定中只暴露 `activated(int)`，不能使用旧式 `activated[str]` 选择重载。
+- 历史选择现在通过 activated index 读取 `itemText(index)`，再复用原 `_goto()` 路径；MRU、AXF completer、J-Link 单 Owner 均不变。
+- `QThread: Destroyed while thread is still running` 是构造阶段异常退出后的级联提示；主启动异常修复后不会由该路径触发。
+
+## V0.6.4 Memory Navigation History
+Memory `Address / Symbol` now keeps a persistent MRU drop-down of successful Symbol/address queries, with explicit clear and no per-key target I/O.

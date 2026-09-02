@@ -107,6 +107,8 @@ Display 才使用：
 - 新会话默认从 MCU SRAM 基址 `0x20000000` 打开；不要恢复上次随机浏览地址覆盖首次有用视图。
 - Symbol 列必须保持单行对齐和 elide；列右边界允许用户拖动调整宽度，禁止把多个长符号用自由文本拼接后覆盖 Hex 区。调整列宽仅属于 Presentation，不得触发 AXF 重解析或 J-Link 读取。
 - Address / Symbol 输入框的符号搜索必须基于 AXF 加载时一次构建的本地 Model/Index；每次键入不得重建 Symbol UI、不得触发 J-Link 读取。完整成员路径和数组路径（如 `obj.member`、`buffer[1]`）必须直接解析到已加载符号地址。
+- Memory Address / Symbol 查询历史只记录成功导航项，使用独立 MRU 状态持久化；下拉历史不得替代/重建 AXF Completion Model。清空历史仅清导航记录，不清当前地址、不访问目标。
+- Memory 历史下拉可显示当前 SymbolIndex 解析出的 Type/Address 元数据；AXF reload 后刷新。精确标量 Symbol/成员导航时，若 `type_name` 属于支持类型，必须在 goto 前把 Memory Display Type 自动切换为该类型；raw 地址、struct/array/unknown 禁止猜类型。此过程不得增加目标 I/O。
 - 支持 CE 风格直接编辑：Byte 区两位 Hex 直接写、Text 区键入/粘贴直接写、拖动/Shift 选择连续内存块并复制。
 - 双击编辑弹窗的 OK 本身就是确认；Memory Explorer 直接编辑路径禁止再叠加第二个确认框。手工 Typed R/W 面板可保留独立确认。
 - V0.5 默认 Write 以 WriteMemEx 完整 byte count 为成功条件；除非有新明确需求，不要重新给所有写操作强制 ReadBack Verify。
@@ -301,3 +303,13 @@ Issue 只有同时满足以下条件才算 DONE：
 - 架构变化写 ADR
 
 “代码写完”不等于完成。
+
+### V0.6.5 PySide6 Combo Signal 兼容基线
+- Memory Address/Symbol 历史 `QComboBox` 在 PySide6/Qt6 下使用 `activated(int)`；禁止使用当前绑定不存在的 `activated[str] / activated(QString)`。
+- 历史点击通过 index → `itemText(index)` 取查询文本，再复用 `_goto()`；不得为此增加 J-Link I/O、重建 AXF Symbol Model 或改变 MRU 语义。
+- 构造阶段异常导致的 `QThread: Destroyed while thread is still running` 优先视为上游初始化异常的级联结果；先修第一个 traceback，不把级联提示误判成独立线程根因。
+
+### V0.6.6 Symbol Typed Memory Navigation 基线
+- Address/Symbol 编辑框尺寸保持 320~520 px；历史 popup 使用 History/Type/Address 三列，小型 MRU 与 AXF QCompleter Model 继续完全分离。
+- History Type/Address 只从当前 SymbolIndex 本地解析，打开/刷新历史不得访问 J-Link。
+- exact scalar Symbol 跳转按 AXF/DWARF 类型自动切换 Memory Display Type；仅允许 core.datatype 支持的类型，不对 raw address/container 猜测。

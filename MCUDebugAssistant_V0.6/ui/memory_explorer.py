@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QAbstractScrollArea,
     QApplication,
     QCheckBox,
+    QComboBox,
     QCompleter,
     QHeaderView,
     QHBoxLayout,
@@ -50,6 +51,8 @@ from core.memory_browser import (
     parse_address,
     plan_read_window,
     text_edit_unit_size,
+    update_navigation_history,
+    symbol_display_type,
 )
 
 
@@ -1089,6 +1092,10 @@ class HexMemoryView(QAbstractScrollArea):
             QApplication.clipboard().setText(f"0x{self._selected_address:08X}")
 
     # ---------- menu options ----------
+    def set_display_type(self, type_name: str) -> None:
+        """Apply a typed Memory view without coupling callers to menu internals."""
+        self._set_display_type(type_name)
+
     def _set_display_type(self, type_name: str) -> None:
         if type_name not in DISPLAY_TYPES:
             return
@@ -1204,14 +1211,52 @@ class MemoryExplorerPage(QWidget):
         toolbar = QHBoxLayout()
         toolbar.addWidget(QLabel("Address / Symbol"))
         self._symbol_index = SymbolIndex()
-        self.address_edit = QLineEdit(f"0x{DEFAULT_RAM_BASE:08X}")
+        # Editable combo keeps the original Address/Symbol editor footprint but
+        # adds a CE-like drop-down containing only successful navigation queries.
+        # Symbol completion remains a separate AXF-backed QCompleter on the line
+        # edit, so opening history never rebuilds/filter-scans the symbol model.
+        self._navigation_history: list[str] = []
+        self.address_combo = QComboBox()
+        self.address_combo.setEditable(True)
+        self.address_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.address_combo.setMinimumWidth(320)
+        self.address_combo.setMaximumWidth(520)
+        self.address_combo.setToolTip("输入地址或 Symbol；右侧下拉箭头显示历史查询、类型与地址")
+
+        # History is a tiny MRU model, deliberately separate from the large AXF
+        # completion model. The editor keeps the same footprint; only the popup
+        # expands to show Query / Type / Address like the symbol completion list.
+        self._history_model = QStandardItemModel(0, 3, self)
+        self._history_model.setHorizontalHeaderLabels(["History", "Type", "Address"])
+        history_popup = QTreeView()
+        history_popup.setRootIsDecorated(False)
+        history_popup.setAlternatingRowColors(True)
+        history_popup.setUniformRowHeights(True)
+        history_popup.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        history_popup.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        history_popup.setMinimumWidth(620)
+        history_popup.setMinimumHeight(180)
+        history_popup.setMaximumHeight(360)
+        history_popup.setColumnWidth(0, 330)
+        history_popup.setColumnWidth(1, 120)
+        history_popup.setColumnWidth(2, 130)
+        history_popup.header().setStretchLastSection(False)
+        history_popup.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.address_combo.setModel(self._history_model)
+        self.address_combo.setView(history_popup)
+        self.address_combo.setModelColumn(0)
+        self.address_edit = self.address_combo.lineEdit()
+        self.address_edit.setText(f"0x{DEFAULT_RAM_BASE:08X}")
         self.address_edit.setPlaceholderText(
             "0x20000000 或变量/成员，例如 BlowerParamsObj.m_PosSpeed、buffer[1]"
         )
-        self.address_edit.setMinimumWidth(320)
-        self.address_edit.setMaximumWidth(520)
         self.address_edit.returnPressed.connect(self._goto)
-        toolbar.addWidget(self.address_edit)
+        self.address_combo.activated.connect(self._history_activated)
+        toolbar.addWidget(self.address_combo)
+        self.clear_history_btn = QPushButton("Clear History")
+        self.clear_history_btn.setToolTip("清空 Memory Address / Symbol 查询历史")
+        self.clear_history_btn.clicked.connect(self._clear_navigation_history)
+        toolbar.addWidget(self.clear_history_btn)
 
         # Build the symbol rows only when AXF/ELF changes. QCompleter filters the
         # existing model locally while typing, so there is no per-key row rebuild
@@ -1281,7 +1326,7 @@ class MemoryExplorerPage(QWidget):
         self.status_label = QLabel(
             "单击选择；拖动/Shift 选择内存块；Byte 视图直接键入两个十六进制字符即可写入；"
             "Text 区可直接键入文本；双击弹窗编辑；Ctrl+C/Ctrl+V；Address / Symbol 可输入地址、变量、"
-            "结构体成员或数组成员（如 buffer[1]），输入时本地过滤，回车跳转；F5 刷新，Ctrl+G 跳转。"
+            "结构体成员或数组成员（如 buffer[1]），输入时本地过滤，回车跳转；Symbol 跳转会自动采用其标量类型；成功查询会记入带 Type/Address 的下拉历史，可手动清空；F5 刷新，Ctrl+G 跳转。"
         )
         self.status_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         layout.addWidget(self.status_label)
@@ -1303,11 +1348,15 @@ class MemoryExplorerPage(QWidget):
         self._symbol_index = SymbolIndex(records)
         self.view.set_symbols(records)
         self._rebuild_symbol_completion_model()
+        # Type/address columns in the small MRU popup are resolved from the
+        # latest AXF/DWARF index, so a reloaded image never leaves stale types.
+        self._sync_navigation_history_combo()
 
     def clear_symbols(self) -> None:
         self._symbol_index = SymbolIndex()
         self._install_symbol_completion_model(())
         self.view.clear_symbols()
+        self._sync_navigation_history_combo()
 
     def set_block(self, address: int, data: bytes) -> None:
         self.view.set_block(address, data)
@@ -1325,6 +1374,7 @@ class MemoryExplorerPage(QWidget):
             {
                 "auto_refresh": self.auto_check.isChecked(),
                 "auto_interval_ms": self.auto_interval.value(),
+                "navigation_history": list(self._navigation_history),
             }
         )
         return state
@@ -1333,9 +1383,20 @@ class MemoryExplorerPage(QWidget):
         if not isinstance(state, dict):
             return
         self.view.load_settings_state(state)
+        saved_history = state.get("navigation_history", [])
+        if isinstance(saved_history, (list, tuple)):
+            self._navigation_history = []
+            # Rebuild through the same MRU helper so stale duplicate/blank entries
+            # from future/older settings cannot pollute the drop-down. Reverse the
+            # saved MRU list because each update inserts at the front.
+            for item in reversed(saved_history[:50]):
+                self._navigation_history = update_navigation_history(
+                    self._navigation_history, str(item), max_items=50
+                )
+            self._sync_navigation_history_combo()
         # V0.5.1 intentionally does not restore a stale previous address. Every
         # new application session starts at the MCU SRAM base for a useful first
-        # view; Go/Ctrl+G can then navigate anywhere in the 32-bit space.
+        # view; navigation history is restored independently for quick reuse.
         self.goto_address(DEFAULT_RAM_BASE)
         self.auto_interval.setValue(int(state.get("auto_interval_ms", 1000) or 1000))
         self.auto_check.setChecked(bool(state.get("auto_refresh", False)))
@@ -1369,9 +1430,73 @@ class MemoryExplorerPage(QWidget):
                 else:
                     self.status_label.setText("No AXF/ELF symbols loaded")
                 return
-            self._goto_symbol(symbol)
+            self._goto_symbol(symbol, remember=True)
             return
+        self._remember_navigation_query(f"0x{address:08X}")
         self.goto_address(address)
+
+    def _history_metadata(self, query: str) -> tuple[str, str]:
+        """Resolve display-only history metadata without target I/O."""
+        text = str(query).strip()
+        if not text:
+            return "", ""
+        try:
+            address = parse_address(text)
+        except ValueError:
+            symbol = self._symbol_index.exact_name(text)
+            if symbol is None:
+                return "", ""
+            return symbol.type_name or symbol.kind or "", f"0x{symbol.base_address:08X}"
+
+        resolved = self._symbol_index.exact(address) if self._symbol_index else None
+        type_text = (resolved.type_name or resolved.kind or "") if resolved is not None else ""
+        return type_text, f"0x{address:08X}"
+
+    def _sync_navigation_history_combo(self) -> None:
+        current_text = self.address_edit.text()
+        self.address_combo.blockSignals(True)
+        try:
+            self._history_model.removeRows(0, self._history_model.rowCount())
+            for query in self._navigation_history:
+                type_text, address_text = self._history_metadata(query)
+                row = [
+                    QStandardItem(query),
+                    QStandardItem(type_text),
+                    QStandardItem(address_text),
+                ]
+                for item in row:
+                    item.setEditable(False)
+                self._history_model.appendRow(row)
+            self.address_combo.setCurrentIndex(-1)
+            self.address_combo.setEditText(current_text)
+        finally:
+            self.address_combo.blockSignals(False)
+
+    def _remember_navigation_query(self, query: str) -> None:
+        self._navigation_history = update_navigation_history(
+            self._navigation_history, query, max_items=50
+        )
+        self._sync_navigation_history_combo()
+
+    def _clear_navigation_history(self) -> None:
+        current_text = self.address_edit.text()
+        self._navigation_history.clear()
+        self._sync_navigation_history_combo()
+        self.address_combo.setEditText(current_text)
+        self.status_label.setText("Address / Symbol history cleared")
+
+    def _history_activated(self, index: int) -> None:
+        # PySide6/Qt6 exposes QComboBox.activated as activated(int).
+        # The old Qt/PyQt-style activated[str] overload is not available and
+        # raises IndexError during widget construction on the user's runtime.
+        # Resolve the selected MRU text from the activated index instead.
+        if index < 0 or index >= self.address_combo.count():
+            return
+        query = self.address_combo.itemText(index).strip()
+        if not query:
+            return
+        self.address_combo.setEditText(query)
+        self._goto()
 
     def _rebuild_symbol_completion_model(self) -> None:
         self._install_symbol_completion_model(self._symbol_index.preferred_symbols())
@@ -1398,9 +1523,17 @@ class MemoryExplorerPage(QWidget):
     def _symbol_completion_activated(self, symbol_name: str) -> None:
         symbol = self._symbol_index.exact_name(symbol_name)
         if symbol is not None:
-            self._goto_symbol(symbol)
+            self._goto_symbol(symbol, remember=True)
 
-    def _goto_symbol(self, symbol) -> None:
+    def _goto_symbol(self, symbol, *, remember: bool = False) -> None:
+        if remember:
+            self._remember_navigation_query(symbol.name)
+        # Exact scalar symbols carry a normalized AXF/DWARF type. Adopt that
+        # type immediately so the first Memory frame at the destination is
+        # interpreted correctly (e.g. uint8 -> UInt8 instead of Byte/Hex).
+        display_type = symbol_display_type(symbol.type_name)
+        if display_type is not None:
+            self.view.set_display_type(display_type)
         self.goto_address(symbol.base_address)
         type_text = symbol.type_name or symbol.kind or "unknown"
         self.status_label.setText(

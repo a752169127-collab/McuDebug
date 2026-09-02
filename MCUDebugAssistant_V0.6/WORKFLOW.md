@@ -59,3 +59,6 @@
 - 默认 Release 热路径无临时诊断开销
 
 达到 Gate 后 **STOP**，不要继续无目标优化。
+
+
+> Current baseline: V0.6.6 — Symbol Typed Memory Navigation.

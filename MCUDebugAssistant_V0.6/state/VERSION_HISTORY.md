@@ -1,5 +1,9 @@
 # VERSION_HISTORY
 
+- V0.6.6 — Symbol Typed Memory Navigation: Memory history popup adds Type/Address metadata; exact AXF/DWARF scalar Symbol jumps automatically switch Memory Display Type before navigation without extra J-Link I/O.
+- V0.6.5 — PySide6 Memory History Startup Fix: replace invalid `QComboBox.activated[str]` binding with Qt6-compatible integer activation and `itemText(index)` resolution; no feature/architecture change.
+- V0.6.4 — Memory Navigation History: editable Address/Symbol history combo, persistent 50-entry successful-query MRU, direct history re-navigation and explicit clear while preserving local non-blocking AXF completion.
+
 - V0.6.3 — Persistent Results + Excel Clipboard: new SAMPLE defaults to Avg/Min/Max; Results persist across Test Runs; Results tab owns one-click TSV clipboard copy and explicit Clear Results; completed runs clear only Runtime detail.
 
 - V0.6.2 — Clean Automation Results: separates internal Runtime Context from user Results, makes SAMPLE output Avg-only by default with optional Min/Max/Std, hides Count from result schema, and opens Results automatically when the run completes.

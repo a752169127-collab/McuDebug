@@ -24,3 +24,6 @@
 - [ ] ADR（如需要）更新
 - [ ] 新版本包生成
 - [ ] 最终答复包含下一步验证步骤
+
+
+> Current baseline: V0.6.6 — Symbol Typed Memory Navigation.

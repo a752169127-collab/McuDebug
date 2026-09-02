@@ -1,3 +1,23 @@
+# CHANGELOG
+
+## V0.6.6 — Symbol Typed Memory Navigation
+- Memory Address/Symbol history popup now shows three columns: History, Type, Address, while preserving the original editable combo width.
+- History Type/Address metadata is resolved locally from the latest AXF/DWARF SymbolIndex and refreshed on symbol reload; no target I/O is added to history display.
+- Navigating to an exact scalar Symbol/member automatically applies its AXF/DWARF datatype to the Memory value pane before the jump (`uint8`, `int16`, `float`, etc.).
+- Raw numeric addresses and non-scalar/unknown Symbol types do not trigger datatype guessing and preserve the current Memory display type.
+- Preserves V0.6.5 Qt6 `activated(int)` history compatibility, local QCompleter filtering, visible-range reads and single J-Link owner.
+
+## V0.6.5 — PySide6 Memory History Startup Fix
+- Fixed startup crash in Memory Explorer on PySide6/Qt6 caused by `QComboBox.activated[str]`; Qt6 exposes the combo activation signal as `activated(int)` and separate text signals.
+- History selection now resolves the MRU entry with `itemText(index)` and reuses the existing `_goto()` path.
+- No change to Symbol QCompleter filtering, MRU persistence, Memory I/O, Watch, Scope, or Test Automation behavior.
+
+## V0.6.4 — Memory Navigation History
+- Memory `Address / Symbol` upgraded to an editable history combo at the original editor width.
+- Successful Symbol/address navigation is stored as a 50-item MRU list and persisted in QSettings.
+- History drop-down selection reuses the existing local Symbol/address resolution path; typing still performs zero J-Link I/O.
+- Added explicit `Clear History` without clearing the current address field.
+
 # V0.6.3 — Persistent Results + Excel Clipboard
 
 ## Changed

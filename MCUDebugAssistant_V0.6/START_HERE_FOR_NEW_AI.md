@@ -24,3 +24,6 @@
 `问题定义 → 最小证据 → Change Plan → 实现 → 自动测试 → 硬件状态 → 更新真正变化的项目记忆 → STOP`
 
 不要只修改代码，也不要为了“完整”而每轮重写全部 Agent/Docs。每轮结束后必须让一个完全没有旧聊天记录的新 AI 也能继续开发。
+
+
+> Current baseline: V0.6.6 — Symbol Typed Memory Navigation.
