@@ -34,21 +34,35 @@
 
 按顺序读取：
 
-- `state/PROJECT_STATE.yaml`
-- `state/ISSUE_LEDGER.md`
-- `state/VERSION_HISTORY.md`
-- `state/TEST_STATUS.md`
-- `state/LATEST_HANDOFF.md`
-- `docs/PROJECT_CONTEXT.md`
-- `docs/ARCHITECTURE.md`
-- `docs/KNOWN_PITFALLS.md`
-- 当前源码与测试
-- 最新 CHANGELOG
+- `docs/state/PROJECT_STATE.yaml`
+- `docs/state/LATEST_HANDOFF.md`
+- `docs/state/ISSUE_LEDGER.md`
+- `docs/state/TEST_STATUS.md`
+- `docs/state/VERSION_HISTORY.md`
+- `docs/architecture/ADR.md`
+- `docs/architecture/PROJECT_CONTEXT.md`
+- `docs/architecture/ARCHITECTURE.md`
+- `docs/architecture/KNOWN_PITFALLS.md`
+- `CHANGELOG.md`
+- `docs/releases/README.md`（仅用于定位需要的历史 Release Report）
+- 当前任务相关源码与测试
 - 用户最新日志、截图、复现步骤
+
+历史 `docs/releases/RELEASE_REPORT_*.md` 默认**不要全读**；只有当前状态/交接无法解释设计来源或回归时，才按 `docs/releases/README.md` 精确追溯。
 
 不要因为聊天历史很长就猜测旧状态；以当前仓库和这些状态文件为准。
 
 ---
+
+## 文档与 AI 知识库布局（V0.6.16）
+
+- 根目录只保留高频入口：`README.md / START_HERE_FOR_NEW_AI.md / AGENTS.md / SKILL.md / CHANGELOG.md`。
+- `docs/state/`：当前状态、Issue、测试状态、版本历史、最新交接；这是二次开发最优先读取的动态记忆。
+- `docs/architecture/`：架构、ADR、项目上下文、已知陷阱、渲染设计；用于理解长期不变量和设计原因。
+- `docs/development/`：Workflow、自动更新 Checklist、给新 AI 的辅助提示。
+- `docs/releases/`：历史 Release Report 与索引；默认只读最新/相关版本，不做无差别全量读取。
+- 文档移动只改变知识库路径，不得改变 J-Link/Scope/Memory/Automation 运行逻辑。
+- 新版本结束时必须更新 `docs/releases/README.md` 的 Current 条目，并在 `docs/releases/` 新建当前版本 Release Report。
 
 ## 二、不可破坏的项目架构原则
 
@@ -113,6 +127,30 @@ Display 才使用：
 - 双击编辑弹窗的 OK 本身就是确认；Memory Explorer 直接编辑路径禁止再叠加第二个确认框。手工 Typed R/W 面板可保留独立确认。
 - V0.5 默认 Write 以 WriteMemEx 完整 byte count 为成功条件；除非有新明确需求，不要重新给所有写操作强制 ReadBack Verify。
 
+### V0.6.15 Cross-Module Symbol Actions 基线
+- Memory Symbol 的跨模块动作统一为 `Add to Watch / Add to Scope / Copy Symbol`；Watch 为 `Add to Scope / Open in Memory / Copy Symbol`；Scope 为 `Open in Memory / Add to Watch / Copy Symbol`。
+- 跨模块动作只传递 `name/address/type`，禁止因此新增 J-Link Session、Worker 或直接 DLL I/O；仍由 MainWindow 连接现有模块对象。
+- `Open in Memory` 必须用 Symbol 全名 + 地址双重确认 AXF/DWARF 身份；精确匹配才走 Semantic Symbol 导航。手工命名/不匹配变量退化为 Raw address，禁止按同名或邻近地址猜 Symbol。
+- Scope RTT channel 是 target-defined stream，不保证有 AXF address；`Open in Memory` 与 `Add to Watch` 必须禁用/拒绝，Copy channel name 可保留。
+- Scope 正在采样时禁止通过跨模块菜单改变 HSS channel definition；与原 Add/Remove 控件的锁定语义一致。
+- Copy Symbol 属于纯本地剪贴板动作，不访问 J-Link、不重建 SymbolIndex。
+
+### V0.6.14 Semantic Navigation / Selection 基线
+- `_anchor_address` 只用于规划 Semantic bounded read neighborhood，不是长期滚动位置。
+- 显式 Symbol/member 导航允许一次性把目标滚到中间并选中目标行，给用户明确定位反馈；Auto/Manual Refresh 禁止再次 `scrollTo(anchor)`。
+- Refresh/model rebuild 只允许按 `selectionModel().selectedRows()` 保留真实 selection，禁止用 stale `currentIndex()` 推断选择。
+- Symbols viewport 空白处单击必须清除 selection + current index；之后 refresh 不得重新选回。
+- Refresh/model rebuild 必须保持用户 vertical/horizontal viewport；cached non-force refresh 不重建相同 Symbol model。
+
+### V0.6.12 Semantic Memory View 基线
+- Memory 同时保留 `Raw` 与 `Symbols` 两种 renderer；`Auto` 只根据导航语义选择 renderer，不允许在滚动过程中启发式反复切换。
+- Symbol view 只显示可安全按已知标量类型解释的 AXF/DWARF/ELF leaf；struct/array container、padding、unknown 不得伪造成标量。
+- 同一地址存在 DWARF typed leaf 与 ELF size-guess fallback 时，Semantic view 优先 DWARF，避免重复/错误语义。
+- 每个成员按自己的 normalized type/size 解码；禁止把整个 Semantic view 强制套用一个全局 Display Type。
+- Semantic view 必须复用一个 bounded raw block read（当前 max 2048 B）并在本地切片；严禁“每个 Symbol 一次 ReadMemEx”。
+- Raw Memory 仍是 Buffer、padding、未知内存、协议数据和底层布局的权威视图，不能被 Semantic view 删除或弱化。
+- Symbol view 的列宽/排序/值格式属于 Presentation；不得导致 AXF 重解析或额外 Probe I/O。
+
 ### Test Automation Studio
 - Test Automation 是 Watch/Scope/Memory 之上的编排层，不得拥有独立 J-Link Session，也不得从 GUI 直接调用 DLL。
 - V0.6.0 自动化读写必须经过唯一 `JLinkWorker`；测试 Run 开始时停止连续 Watch/Scope sampling，使用 request/response polling 保证执行语义确定。
@@ -133,6 +171,37 @@ Display 才使用：
 - 多个独立 PlotWidget/Scene 的旧 Stacked 架构
 - 在鼠标移动热路径调用 `adjustSize()`
 - 为追 FPS 随意修改 Qt update mode 而不做正确性 A/B
+
+### V0.6.11 Engineering Preset Controls 基线
+- Memory Auto Refresh、Watch Sample every、Scope Sampling/Buffer/FPS 使用统一可编辑工程预设下拉，不再使用单步 `+1/-1` SpinBox 作为主交互。
+- 预设只是快捷值，不是能力上限；控件必须允许用户直接键入合法范围内的自定义整数，并继续通过整数 `value()/setValue()` 与现有 settings/worker 语义兼容。
+- 预设选择/自定义输入只改变本地参数值，不得因为 UI 控件替换改变 J-Link I/O、Scope acquisition、Ring Buffer、Presentation Pacer 或 Watch sampling 语义。
+- Scope Buffer 保持当前 1~120 s 产品范围；不要仅为了增加下拉选项扩张 Ring `max_points=1_500_000` 或制造“配置 300 s 但高采样率实际保留不足”的误导。
+- 常用预设：Memory `100/200/500/1000/2000/5000 ms`；Watch `10/20/50/100/200/500/1000/2000 ms`；Scope Sampling `10/20/50/100/200/500/1000/2000/5000 Hz`；Buffer `1/2/5/10/15/30/60/120 s`；FPS `15/30/60/90/120/144`。
+
+### V0.6.10 Compact Connection / Automation Table UI 基线
+- J-Link Connection 配置区允许 `− / +` 折叠；成功连接后自动折叠，断开后自动展开。折叠时必须保留连接状态摘要和 `Disconnect`，不能让用户为了断开而先展开面板。
+- 已连接时即使用户手动展开，DLL/Device/Interface/Speed 等配置仍保持 disabled；折叠只是 Presentation，不能改变 Session 配置或产生额外 J-Link I/O。
+- Test Automation 业务表格隐藏 Qt `verticalHeader`，避免与业务 Case/顺序信息重复；Workflow 不再保留显式 `#` 列，执行顺序由行顺序表达。
+
+### V0.6.9 Memory History Stable-order / Delete-button 基线
+- Address / Symbol History 的单条删除主入口是常驻 `Delete History` 按钮；不能依赖 QComboBox popup 内嵌右键菜单作为唯一删除方式。
+- 用户从 History 选择既有 Symbol/地址时只执行导航，不调用 MRU update，不改变历史顺序。只有用户新输入并成功导航的查询才允许按 MRU 规则插入/去重。
+- `Delete History` 删除当前选中/当前查询对应的单条历史，必须保留当前 Memory 地址与编辑框文本，且不得产生 J-Link Read/Write。`Clear History` 才是全部清空。
+- History 删除/选择仍是本地状态操作；不得重建 AXF completion model，不得访问目标。
+
+### V0.6.8 Memory Symbol / History Reliability 基线
+- `Address / Symbol` 的 AXF 候选确认只有 `QCompleter.activated` 可以提交候选；禁止再次从 line edit Enter 读取 completer currentIndex/currentCompletion 猜候选。
+- editable `QComboBox` 的 `activated(int)` 只有在用户确实打开过 History popup 的 session 内才能转成历史导航；Symbol completion Enter 绝不能触发历史 MRU 二次导航。
+- Symbol 导航后编辑框保留完整 Symbol；原始地址导航才显示 canonical `0xXXXXXXXX`。
+- History 必须支持单条删除以及 Clear All；V0.6.9 起单删主入口为常驻 `Delete History` 按钮，Delete 键可辅助。删除历史只更新本地记录/QSettings，不改变当前地址、不访问 J-Link。
+- Symbol 主列默认 auto-fit；V0.6.8 新增显式 `symbol_width_mode`。旧配置没有该字段时必须迁移到 auto，避免历史窄列状态继续遮住完整变量名。新版本用户主动拖列才允许持久化 manual mode。
+
+### V0.6.7 Memory Navigation / Watch Commit 基线
+- Address/Symbol 输入的键盘候选确认必须使用当前 popup 明确高亮行；禁止在 popup 隐藏/无明确选择时使用陈旧 `currentCompletion()` 猜 Symbol。History activation 必须直接按所选 MRU model row 导航，避免 editable combo + completer 双重 Enter 竞态。
+- Symbol 导航后编辑框保留完整 Symbol path；只有用户明确以数值地址导航时才显示 canonical `0xXXXXXXXX`。
+- Memory Symbol 列默认自动适应当前可见 Symbol 全名；popup 在本地 Model rebuild 时自动 fit。自动宽度计算只能访问本地 SymbolIndex/FontMetrics，禁止因此产生 J-Link I/O 或每个键入字符全模型重建。
+- Watch Set Value 的硬件写触发以 delegate `setModelData()` 正式 commit 为准：Enter / focus-out 统一；用户重新输入与原单元格相同的值仍视为显式写请求；未编辑不写，dirty guard 去重。
 
 ---
 

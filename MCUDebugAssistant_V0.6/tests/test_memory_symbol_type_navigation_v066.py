@@ -30,7 +30,7 @@ def test_v066_symbol_navigation_applies_axf_scalar_type_before_goto():
     block = source[start:end]
     assert "display_type = symbol_display_type(symbol.type_name)" in block
     assert "self.view.set_display_type(display_type)" in block
-    assert block.index("self.view.set_display_type(display_type)") < block.index("self.goto_address(symbol.base_address)")
+    assert block.index("self.view.set_display_type(display_type)") < block.index("self.goto_address(symbol.base_address, display_text=symbol.name)")
 
 
 def test_v066_history_metadata_refreshes_after_symbol_reload_without_target_io():

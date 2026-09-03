@@ -11,7 +11,7 @@ def test_memory_address_bar_supports_model_backed_symbol_completion():
     assert 'self._symbol_completion_model = QStandardItemModel' in SOURCE
     assert 'self.address_edit.setCompleter(self._symbol_completer)' in SOURCE
     assert 'self._symbol_index.exact_name(text)' in SOURCE
-    assert 'self._symbol_completer.currentCompletion()' in SOURCE
+    assert 'self._symbol_completer.activated[str].connect(self._symbol_completion_activated)' in SOURCE
 
 
 def test_symbol_search_path_does_not_request_jlink_per_keystroke():

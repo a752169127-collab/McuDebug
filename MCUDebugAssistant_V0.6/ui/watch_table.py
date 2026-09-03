@@ -3,12 +3,14 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 
-from PySide6.QtCore import QPersistentModelIndex, QTimer, Qt, Signal
+from PySide6.QtCore import QTimer, Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
+    QApplication,
     QHeaderView,
     QLineEdit,
+    QMenu,
     QStyledItemDelegate,
     QTableWidget,
     QTableWidgetItem,
@@ -19,13 +21,15 @@ from core.watch import RunningStats, WatchVariableSpec
 
 
 class SetValueDelegate(QStyledItemDelegate):
-    """Commit Set Value on Enter *or* when a modified editor loses focus.
+    """Write every user-edited Set Value on the delegate's real commit path.
 
-    A QTable delegate normally commits the model on focus-out, but the old product
-    behavior only emitted the target write from ``returnPressed``. That meant a
-    user could type a Set Value, click another cell, see the edit committed in the
-    table, yet never write it to the MCU. Track actual user edits and use the same
-    write path for Enter and focus-out.
+    Qt already commits a delegate editor on Enter and on focus-out. V0.5.5
+    listened to QLineEdit.editingFinished separately, which can be skipped or
+    ordered awkwardly when clicking another table cell, especially when the new
+    text is identical to the existing model value. Tracking user edits in the
+    editor and emitting the MCU write from setModelData() makes both Enter and
+    mouse focus-out use one authoritative path. Same-value edits still write;
+    untouched cells do not, and duplicate commits are suppressed by the dirty flag.
     """
 
     commit_requested = Signal(int)
@@ -33,28 +37,27 @@ class SetValueDelegate(QStyledItemDelegate):
     def createEditor(self, parent, option, index):
         editor = super().createEditor(parent, option, index)
         if isinstance(editor, QLineEdit):
-            persistent_index = QPersistentModelIndex(index)
             editor.setProperty("watch_set_value_dirty", False)
 
             def mark_dirty(_text: str) -> None:
                 editor.setProperty("watch_set_value_dirty", True)
 
-            def commit_if_dirty() -> None:
-                if not bool(editor.property("watch_set_value_dirty")):
-                    return
-                # Clear first so Return -> editingFinished cannot queue the same
-                # write twice. commitData updates the QTableWidgetItem before the
-                # deferred write request reads its text.
-                editor.setProperty("watch_set_value_dirty", False)
-                self.commitData.emit(editor)
-                row = persistent_index.row()
-                if row >= 0:
-                    QTimer.singleShot(0, lambda r=row: self.commit_requested.emit(r))
-
             editor.textEdited.connect(mark_dirty)
-            editor.returnPressed.connect(commit_if_dirty)
-            editor.editingFinished.connect(commit_if_dirty)
         return editor
+
+    def setModelData(self, editor, model, index) -> None:  # noqa: N802
+        dirty = isinstance(editor, QLineEdit) and bool(editor.property("watch_set_value_dirty"))
+        super().setModelData(editor, model, index)
+        if not dirty:
+            return
+        # Clear before the deferred signal so Enter followed by focus-out cannot
+        # send the same target write twice. This is intentionally independent of
+        # whether the model text actually changed: re-entering the same value is
+        # still an explicit hardware write request.
+        editor.setProperty("watch_set_value_dirty", False)
+        row = int(index.row())
+        if row >= 0:
+            QTimer.singleShot(0, lambda r=row: self.commit_requested.emit(r))
 
 
 @dataclass
@@ -67,6 +70,8 @@ class WatchRowState:
 class WatchTable(QTableWidget):
     definition_changed = Signal()
     write_requested = Signal(int)  # row_id
+    add_scope_requested = Signal(str, object, str)  # name, address, type_name
+    open_memory_requested = Signal(str, object, str)  # name, address, type_name
 
     COL_ENABLE = 0
     COL_NAME = 1
@@ -123,6 +128,8 @@ class WatchTable(QTableWidget):
         self.setItemDelegateForColumn(self.COL_SET, self._set_value_delegate)
 
         self.itemChanged.connect(self._on_item_changed)
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._show_context_menu)
 
     def add_variable(
         self,
@@ -207,6 +214,53 @@ class WatchTable(QTableWidget):
 
     def selected_row_id(self) -> int | None:
         return self.row_id_at(self.currentRow()) if self.currentRow() >= 0 else None
+
+    def _row_symbol_info(self, row: int) -> tuple[str, int, str] | None:
+        if row < 0 or row >= self.rowCount():
+            return None
+        name_item = self.item(row, self.COL_NAME)
+        address_item = self.item(row, self.COL_ADDRESS)
+        combo = self.cellWidget(row, self.COL_TYPE)
+        if name_item is None or address_item is None or not isinstance(combo, QComboBox):
+            return None
+        name = name_item.text().strip()
+        try:
+            address = int(address_item.text().strip(), 0)
+        except ValueError:
+            return None
+        if not name or not 0 <= address <= 0xFFFFFFFF:
+            return None
+        type_name = combo.currentText().strip()
+        if type_name not in supported_types():
+            return None
+        return name, address, type_name
+
+    def _show_context_menu(self, pos) -> None:
+        index = self.indexAt(pos)
+        if not index.isValid():
+            return
+        row = index.row()
+        if not self.selectionModel().isRowSelected(row, self.rootIndex()):
+            self.clearSelection()
+            self.selectRow(row)
+        self.setCurrentCell(row, index.column())
+        info = self._row_symbol_info(row)
+        if info is None:
+            return
+        name, address, type_name = info
+
+        menu = QMenu(self)
+        add_scope_action = menu.addAction("Add to Scope")
+        open_memory_action = menu.addAction("Open in Memory")
+        menu.addSeparator()
+        copy_symbol_action = menu.addAction("Copy Symbol")
+        chosen = menu.exec(self.viewport().mapToGlobal(pos))
+        if chosen is add_scope_action:
+            self.add_scope_requested.emit(name, address, type_name)
+        elif chosen is open_memory_action:
+            self.open_memory_requested.emit(name, address, type_name)
+        elif chosen is copy_symbol_action:
+            QApplication.clipboard().setText(name)
 
     def contains_variable(self, name: str, address: int) -> bool:
         target_name = name.strip()

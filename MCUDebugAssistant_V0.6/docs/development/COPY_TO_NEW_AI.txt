@@ -1,0 +1,22 @@
+Current baseline: V0.6.16 — AI Documentation Layout.
+请接手 MCU Debug Assistant 项目。
+
+先读取：
+START_HERE_FOR_NEW_AI.md
+AGENTS.md
+SKILL.md
+docs/development/WORKFLOW.md
+docs/state/PROJECT_STATE.yaml
+docs/state/LATEST_HANDOFF.md
+docs/state/ISSUE_LEDGER.md
+docs/state/TEST_STATUS.md
+docs/releases/README.md（历史报告按需读取，不要全量读取）
+
+然后检查实际源码仓库，仓库状态优先。
+
+以后每一轮必须完成：
+问题定义→证据→根因/假设→实现→compileall/pytest/regression→版本→实机验证状态→自动更新 PROJECT_STATE/ISSUE_LEDGER/VERSION_HISTORY/TEST_STATUS/LATEST_HANDOFF/CHANGELOG/ADR。
+
+不要依赖旧聊天窗口才能继续开发。
+
+Historical release reports: docs/releases/ (read only the relevant/latest report via docs/releases/README.md)

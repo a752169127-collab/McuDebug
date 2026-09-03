@@ -668,6 +668,7 @@ class TestAutomationPage(QWidget):
         layout = QVBoxLayout(box)
         self.parameter_table = QTableWidget(0, 3)
         self.parameter_table.setHorizontalHeaderLabels(["Name", "Source", "Values / Range"])
+        self.parameter_table.verticalHeader().setVisible(False)
         self.parameter_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         self.parameter_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         self.parameter_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
@@ -701,11 +702,11 @@ class TestAutomationPage(QWidget):
     def _build_workflow_group(self) -> QWidget:
         box = QGroupBox("Workflow")
         layout = QVBoxLayout(box)
-        self.step_table = QTableWidget(0, 3)
-        self.step_table.setHorizontalHeaderLabels(["#", "Step", "Summary"])
+        self.step_table = QTableWidget(0, 2)
+        self.step_table.setHorizontalHeaderLabels(["Step", "Summary"])
+        self.step_table.verticalHeader().setVisible(False)
         self.step_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        self.step_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        self.step_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self.step_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.step_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.step_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.step_table.doubleClicked.connect(self._edit_step)
@@ -739,6 +740,7 @@ class TestAutomationPage(QWidget):
         layout.addWidget(self.run_detail_label)
         self.runtime_table = QTableWidget(0, 2)
         self.runtime_table.setHorizontalHeaderLabels(["Value", "Current"])
+        self.runtime_table.verticalHeader().setVisible(False)
         self.runtime_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.runtime_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         layout.addWidget(self.runtime_table, 1)
@@ -760,6 +762,7 @@ class TestAutomationPage(QWidget):
         layout.addLayout(bar)
         self.results_table = QTableWidget(0, len(self._result_columns))
         self.results_table.setHorizontalHeaderLabels(self._result_columns)
+        self.results_table.verticalHeader().setVisible(False)
         self.results_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         layout.addWidget(self.results_table)
         return page
@@ -884,9 +887,8 @@ class TestAutomationPage(QWidget):
     def _refresh_steps(self, select: int | None = None) -> None:
         self.step_table.setRowCount(len(self._steps))
         for row, step in enumerate(self._steps):
-            self.step_table.setItem(row, 0, QTableWidgetItem(str(row + 1)))
-            self.step_table.setItem(row, 1, QTableWidgetItem(STEP_LABELS.get(step.get("kind"), str(step.get("kind")))))
-            self.step_table.setItem(row, 2, QTableWidgetItem(self._step_summary(step)))
+            self.step_table.setItem(row, 0, QTableWidgetItem(STEP_LABELS.get(step.get("kind"), str(step.get("kind")))))
+            self.step_table.setItem(row, 1, QTableWidgetItem(self._step_summary(step)))
         if select is not None and 0 <= select < len(self._steps):
             self.step_table.selectRow(select)
 
@@ -951,6 +953,7 @@ class TestAutomationPage(QWidget):
         names = [spec.name for spec in self._parameter_specs()]
         table = QTableWidget(len(cases), len(names) + 1)
         table.setHorizontalHeaderLabels(["#", *names])
+        table.verticalHeader().setVisible(False)
         for row, case in enumerate(cases):
             table.setItem(row, 0, QTableWidgetItem(str(row + 1)))
             for col, name in enumerate(names, 1):

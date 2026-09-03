@@ -426,3 +426,80 @@ class SymbolIndex:
                 if len(result) >= limit:
                     break
         return result
+
+    def scalar_starts_in_range(
+        self, start: int, end: int, *, limit: int = 512
+    ) -> list[ResolvedSymbol]:
+        """Return typed scalar/member Symbols whose *start* address is in range.
+
+        This is the local metadata source for the semantic Memory view. Containers
+        are intentionally omitted because their scalar leaves (including array
+        elements such as ``obj.bias[0]``..``[3]``) are the rows users can read/edit.
+        Multiple parser records for the same symbolic path are collapsed with the
+        same DWARF-first preference used by exact-name navigation. No target I/O
+        occurs here.
+        """
+        if end <= start or not self._starts or limit <= 0:
+            return []
+        lo = bisect_left(self._starts, int(start))
+        hi = bisect_left(self._starts, int(end))
+        result: list[ResolvedSymbol] = []
+        seen: set[tuple[str, int]] = set()
+        for addr in self._starts[lo:hi]:
+            typed_items = [
+                item for item in self._by_start.get(addr, ())
+                if item.kind == "scalar" and symbol_display_type(item.type_name) is not None
+            ]
+            # When DWARF knows real members at an address, do not also show an
+            # ELF size-guessed object at the same address. This keeps semantic
+            # rows focused on ``obj.member`` / ``array[i]`` rather than duplicate
+            # fallback names. ELF scalars remain useful when DWARF is unavailable.
+            if any(self._source_rank(item.source) >= 3 for item in typed_items):
+                typed_items = [item for item in typed_items if self._source_rank(item.source) >= 3]
+            by_name: dict[str, list[ResolvedSymbol]] = {}
+            for item in typed_items:
+                by_name.setdefault(item.name.casefold(), []).append(item)
+            for items in by_name.values():
+                item = self._pick_name(items)
+                key = (item.name.casefold(), item.base_address)
+                if key in seen:
+                    continue
+                seen.add(key)
+                result.append(item)
+                if len(result) >= limit:
+                    return result
+        return result
+
+
+def plan_symbol_read_window(
+    address: int,
+    *,
+    before_bytes: int = 512,
+    after_bytes: int = 1536,
+    alignment: int = BYTES_PER_ROW,
+    max_read_bytes: int = 2048,
+) -> ReadWindow:
+    """Plan one bounded block read around a semantic Symbol navigation target.
+
+    Symbol rows are decoded from this shared raw block; the view never issues one
+    ReadMemEx per variable/member. The default 2 KiB neighborhood matches the
+    existing Memory Explorer bounded-read ceiling while showing adjacent
+    structure/array members without broad target scanning.
+    """
+    address = max(0, min(MAX_ADDRESS, int(address)))
+    before_bytes = max(0, int(before_bytes))
+    after_bytes = max(1, int(after_bytes))
+    alignment = max(1, int(alignment))
+    max_read_bytes = max(alignment, int(max_read_bytes))
+
+    start = max(0, address - before_bytes)
+    start -= start % alignment
+    end = min(ADDRESS_SPACE_SIZE, address + after_bytes)
+    if end <= start:
+        end = min(ADDRESS_SPACE_SIZE, start + alignment)
+    size = min(max_read_bytes, end - start)
+    if size > alignment:
+        size -= size % alignment
+    if size <= 0:
+        size = min(alignment, ADDRESS_SPACE_SIZE - start)
+    return ReadWindow(start, size)

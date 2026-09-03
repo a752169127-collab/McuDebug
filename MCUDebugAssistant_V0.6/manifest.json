@@ -3,7 +3,11 @@
   "entrypoint": "START_HERE_FOR_NEW_AI.md",
   "agent_process": "AGENTS.md",
   "project_skill": "SKILL.md",
-  "workflow": "WORKFLOW.md",
-  "current_context_version": "V0.6.6",
-  "purpose": "closed-loop AI secondary development for MCU runtime debugging, observability, memory exploration, and no-code test automation"
+  "workflow": "docs/development/WORKFLOW.md",
+  "current_context_version": "V0.6.16",
+  "purpose": "closed-loop AI secondary development for MCU runtime debugging, observability, memory exploration, and no-code test automation",
+  "docs_index": "docs/README.md",
+  "current_state": "docs/state/PROJECT_STATE.yaml",
+  "latest_handoff": "docs/state/LATEST_HANDOFF.md",
+  "release_index": "docs/releases/README.md"
 }

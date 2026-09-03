@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 
-from PySide6.QtCore import QEvent, QRect, QTimer, Qt, Signal
+from PySide6.QtCore import QEvent, QItemSelectionModel, QModelIndex, QRect, QTimer, Qt, Signal
 from PySide6.QtGui import (
     QActionGroup,
     QFontDatabase,
@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMenu,
     QPushButton,
-    QSpinBox,
+    QStackedWidget,
     QTreeView,
     QVBoxLayout,
     QWidget,
@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.datatype import decode_value, encode_value, format_value, get_type_info, supported_types
+from ui.preset_combo import IntPresetComboBox
 from core.memory_browser import (
     ADDRESS_SPACE_SIZE,
     BYTES_PER_ROW,
@@ -50,6 +51,7 @@ from core.memory_browser import (
     format_hex_block,
     parse_address,
     plan_read_window,
+    plan_symbol_read_window,
     text_edit_unit_size,
     update_navigation_history,
     symbol_display_type,
@@ -71,6 +73,44 @@ _DISPLAY_LABELS = {
 }
 
 
+class NavigationHistoryComboBox(QComboBox):
+    """Editable address field whose activation is scoped to its own history popup.
+
+    QComboBox can emit ``activated(int)`` from Enter even while a separate
+    QCompleter attached to its line edit is accepting a Symbol candidate. That
+    made a stale MRU row run *after* the correct Symbol completion and replace
+    it (for example with an old ``__lit__...`` entry). Only forward activation
+    when the combo's own history popup was actually opened by the user.
+    """
+
+    history_activated = Signal(int)
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._history_popup_session = False
+        self.activated.connect(self._forward_history_activation)
+
+    def showPopup(self) -> None:  # noqa: N802
+        self._history_popup_session = True
+        super().showPopup()
+
+    def hidePopup(self) -> None:  # noqa: N802
+        super().hidePopup()
+        # QComboBox may emit activated() while closing the popup. Clear on the
+        # next event-loop turn so a genuine history selection still forwards,
+        # while a cancelled popup cannot poison the next Symbol Enter.
+        QTimer.singleShot(0, self._clear_history_popup_session)
+
+    def _clear_history_popup_session(self) -> None:
+        self._history_popup_session = False
+
+    def _forward_history_activation(self, index: int) -> None:
+        if not self._history_popup_session:
+            return
+        self._history_popup_session = False
+        self.history_activated.emit(int(index))
+
+
 class HexMemoryView(QAbstractScrollArea):
     """Virtual 32-bit MCU memory viewer with CE-style direct editing.
 
@@ -84,6 +124,7 @@ class HexMemoryView(QAbstractScrollArea):
     edit_requested = Signal(object, str, object)  # address, type_name, current raw bytes
     text_edit_requested = Signal(object, str, object)  # address, encoding, current raw bytes
     add_watch_requested = Signal(str, object, str)  # name, address, type_name
+    add_scope_requested = Signal(str, object, str)  # name, address, type_name
     selection_changed = Signal(str)
 
     TOTAL_ROWS = ADDRESS_SPACE_SIZE // BYTES_PER_ROW
@@ -102,10 +143,15 @@ class HexMemoryView(QAbstractScrollArea):
         self._show_symbols = True
         self._show_symbol_offsets = True
         self._show_changes = True
-        # CE-style Symbol column width is user-resizable by dragging its right
-        # separator. Keep this as presentation state only; it never affects
-        # symbol lookup or target memory reads. None means the 32-char default.
+        # Symbol column auto-fits to the longest visible Symbol by default so
+        # users can read full member paths without manually dragging the divider.
+        # A manual drag temporarily switches to fixed width; double-clicking the
+        # divider returns to auto-fit. This is presentation-only and never causes
+        # symbol reparse or target I/O.
         self._symbol_width_px: int | None = None
+        self._symbol_auto_fit = True
+        self._auto_symbol_width_cache_key = None
+        self._auto_symbol_width_cache_value: int | None = None
         self._resizing_symbol_column = False
         self._symbol_index = SymbolIndex()
         self._connected = False
@@ -164,20 +210,26 @@ class HexMemoryView(QAbstractScrollArea):
         self.goto_address(DEFAULT_RAM_BASE)
 
     # ---------- public state ----------
-    def set_connected(self, connected: bool) -> None:
+    def set_connected(self, connected: bool, *, refresh: bool = True) -> None:
         self._connected = bool(connected)
-        if self._connected:
+        if self._connected and refresh:
             self.refresh(force=True)
-        else:
+        elif not self._connected:
             self._read_timer.stop()
             self._cancel_inline_editor()
 
     def set_symbols(self, symbols) -> None:
         self._symbol_index = SymbolIndex(symbols)
+        self._auto_symbol_width_cache_key = None
+        self._auto_symbol_width_cache_value = None
+        self._update_scrollbars()
         self.viewport().update()
 
     def clear_symbols(self) -> None:
         self._symbol_index = SymbolIndex()
+        self._auto_symbol_width_cache_key = None
+        self._auto_symbol_width_cache_value = None
+        self._update_scrollbars()
         self.viewport().update()
 
     def settings_state(self) -> dict:
@@ -189,6 +241,8 @@ class HexMemoryView(QAbstractScrollArea):
             "show_symbol_offsets": self._show_symbol_offsets,
             "show_changes": self._show_changes,
             "symbol_width_px": self._symbol_width_px,
+            "symbol_auto_fit": self._symbol_auto_fit,
+            "symbol_width_mode": "auto" if self._symbol_auto_fit else "manual",
         }
 
     def load_settings_state(self, state: dict) -> None:
@@ -209,6 +263,15 @@ class HexMemoryView(QAbstractScrollArea):
             self._symbol_width_px = int(saved_symbol_width) if saved_symbol_width is not None else None
         except (TypeError, ValueError):
             self._symbol_width_px = None
+        # V0.6.8 introduces an explicit width mode. Older versions persisted
+        # only ``symbol_auto_fit`` and could leave an installation permanently
+        # stuck in a narrow manual width. Absence of the new mode is therefore
+        # migrated to AUTO so full visible Symbol names are shown immediately.
+        width_mode = str(state.get("symbol_width_mode", "")).strip().lower()
+        if width_mode in {"auto", "manual"}:
+            self._symbol_auto_fit = width_mode == "auto"
+        else:
+            self._symbol_auto_fit = True
         self._update_scrollbars()
         self.viewport().update()
 
@@ -282,6 +345,38 @@ class HexMemoryView(QAbstractScrollArea):
     def _visible_rows(self) -> int:
         return max(1, self.viewport().height() // self._row_height() - 1)
 
+    def _auto_symbol_width(self) -> int:
+        """Width needed for full Symbols in the current visible rows.
+
+        The calculation is bounded by visible row count only and uses the local
+        SymbolIndex; it never reads target memory. A sane cap prevents one very
+        long debug name from making the Hex/Text panes unusable.
+        """
+        cw = self._char_width()
+        minimum = cw * 12
+        default = cw * 32
+        maximum = cw * 120
+        if not self._show_symbols or not self._symbol_index:
+            return default
+        first_row = self.verticalScrollBar().value()
+        rows = self._visible_rows()
+        key = (first_row, rows, self._show_symbol_offsets, id(self._symbol_index), cw)
+        if key == self._auto_symbol_width_cache_key and self._auto_symbol_width_cache_value is not None:
+            return self._auto_symbol_width_cache_value
+        fm = self._metrics()
+        widest = 0
+        for row in range(rows):
+            address = (first_row + row) * BYTES_PER_ROW
+            if address >= ADDRESS_SPACE_SIZE:
+                break
+            text = self._row_symbol_text(address)
+            if text:
+                widest = max(widest, fm.horizontalAdvance(text) + cw * 2)
+        value = default if widest <= 0 else max(minimum, min(maximum, widest))
+        self._auto_symbol_width_cache_key = key
+        self._auto_symbol_width_cache_value = value
+        return value
+
     def _column_geometry(self) -> tuple[int, int, int, int, int, int, int]:
         cw = self._char_width()
         hscroll = self.horizontalScrollBar().value()
@@ -293,7 +388,10 @@ class HexMemoryView(QAbstractScrollArea):
         default_symbol_w = cw * 32
         min_symbol_w = cw * 12
         max_symbol_w = cw * 120
-        configured_symbol_w = default_symbol_w if self._symbol_width_px is None else int(self._symbol_width_px)
+        if self._symbol_auto_fit:
+            configured_symbol_w = self._auto_symbol_width()
+        else:
+            configured_symbol_w = default_symbol_w if self._symbol_width_px is None else int(self._symbol_width_px)
         symbol_w = max(min_symbol_w, min(max_symbol_w, configured_symbol_w)) if self._show_symbols else 0
         symbol_x = address_x + address_w
         values_x = symbol_x + symbol_w
@@ -574,6 +672,7 @@ class HexMemoryView(QAbstractScrollArea):
         cw = self._char_width()
         _address_x, _address_w, symbol_x, _symbol_w, _values_x, _text_x, _total_w = self._column_geometry()
         width = int(x) - symbol_x + 3
+        self._symbol_auto_fit = False
         self._symbol_width_px = max(cw * 12, min(cw * 120, width))
         self._cancel_inline_editor()
         self._update_scrollbars()
@@ -677,8 +776,9 @@ class HexMemoryView(QAbstractScrollArea):
     def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
             if self._symbol_resize_hit(int(event.position().x())):
-                # Double-clicking the divider restores the practical default.
+                # Double-clicking the divider returns to automatic full-name fit.
                 self._symbol_width_px = None
+                self._symbol_auto_fit = True
                 self._update_scrollbars()
                 self.viewport().update()
                 event.accept()
@@ -844,9 +944,12 @@ class HexMemoryView(QAbstractScrollArea):
         show_changes.toggled.connect(self._set_show_changes)
 
         menu.addSeparator()
-        add_watch = menu.addAction("将此地址添加到 Watch")
+        add_watch = menu.addAction("Add to Watch")
         add_watch.setEnabled(self._selected_address is not None)
         add_watch.triggered.connect(self._add_selected_to_watch)
+        add_scope = menu.addAction("Add to Scope")
+        add_scope.setEnabled(self._selected_address is not None)
+        add_scope.triggered.connect(self._add_selected_to_scope)
         refresh_action = menu.addAction("刷新\tF5")
         refresh_action.setEnabled(self._connected)
         refresh_action.triggered.connect(lambda: self.refresh(force=True))
@@ -1133,6 +1236,9 @@ class HexMemoryView(QAbstractScrollArea):
 
     def _set_show_symbol_offsets(self, enabled: bool) -> None:
         self._show_symbol_offsets = bool(enabled)
+        self._auto_symbol_width_cache_key = None
+        self._auto_symbol_width_cache_value = None
+        self._update_scrollbars()
         self.viewport().update()
 
     def _set_show_changes(self, enabled: bool) -> None:
@@ -1163,6 +1269,19 @@ class HexMemoryView(QAbstractScrollArea):
         else:
             type_name = "uint8" if self._display_type == "byte" else self._display_type
         self.add_watch_requested.emit(name, address, type_name)
+
+    def _add_selected_to_scope(self) -> None:
+        if self._selected_address is None:
+            return
+        address = self._selected_address
+        exact = self._symbol_index.exact(address)
+        resolved = exact or self._symbol_index.resolve(address)
+        name = resolved.name if resolved is not None and resolved.base_address == address else f"Memory_{address:08X}"
+        if resolved is not None and resolved.base_address == address and resolved.type_name in supported_types():
+            type_name = str(resolved.type_name)
+        else:
+            type_name = "uint8" if self._display_type == "byte" else self._display_type
+        self.add_scope_requested.emit(name, address, type_name)
 
     def _emit_selection_status(self, *, extra: str = "") -> None:
         if self._selected_address is None:
@@ -1198,14 +1317,338 @@ class HexMemoryView(QAbstractScrollArea):
         self.selection_changed.emit(f"{prefix}{range_text} | {value_text}")
 
 
-class MemoryExplorerPage(QWidget):
+class SymbolMemoryView(QWidget):
+    """Typed AXF/DWARF neighborhood view over one bounded raw-memory block.
+
+    Unlike the Raw/Hex view, rows are real scalar Symbols/members and each row is
+    decoded with its own DWARF type/size. The target is still read once as a block;
+    rendering ten or one hundred members never becomes ten or one hundred J-Link
+    reads. This is intentionally a flat first version: full paths preserve struct
+    and array context (``obj.bias[0]``..``[3]``) without inventing hierarchy.
+    """
+
     read_requested = Signal(object, int)
     write_requested = Signal(object, object)
+    edit_requested = Signal(object, str, object)
     add_watch_requested = Signal(str, object, str)
+    add_scope_requested = Signal(str, object, str)
+    selection_changed = Signal(str)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._connected = False
+        self._anchor_address = DEFAULT_RAM_BASE
+        self._symbol_index = SymbolIndex()
+        self._block_start = 0
+        self._block_data = b""
+        # A symbol navigation may need one intentional center-on-anchor after
+        # the next block arrives. Normal/manual/auto refreshes must preserve
+        # the user's current viewport instead of snapping back to the anchor.
+        self._focus_anchor_on_next_block = False
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.tree = QTreeView(self)
+        self.tree.setRootIsDecorated(False)
+        self.tree.setAlternatingRowColors(True)
+        self.tree.setUniformRowHeights(True)
+        self.tree.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.tree.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self._show_context_menu)
+        self.tree.doubleClicked.connect(self._double_clicked)
+        # CE-style selection semantics: a Symbol navigation highlights its target,
+        # but clicking empty viewport space explicitly clears that selection/current
+        # row. Refresh then respects the cleared state instead of resurrecting it.
+        self.tree.viewport().installEventFilter(self)
+        layout.addWidget(self.tree, 1)
+
+        self._model = QStandardItemModel(0, 4, self)
+        self._model.setHorizontalHeaderLabels(["Address", "Symbol", "Type", "Value"])
+        self.tree.setModel(self._model)
+        self.tree.selectionModel().currentRowChanged.connect(self._current_row_changed)
+        header = self.tree.header()
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        header.setMinimumSectionSize(70)
+        self.tree.setColumnWidth(0, 110)
+        self.tree.setColumnWidth(1, 520)
+        self.tree.setColumnWidth(2, 110)
+        self.tree.setColumnWidth(3, 180)
+
+    def set_connected(self, connected: bool) -> None:
+        self._connected = bool(connected)
+
+    def set_symbols(self, symbols) -> None:
+        self._symbol_index = SymbolIndex(symbols)
+        self._rebuild_model(preserve_view=True)
+
+    def clear_symbols(self) -> None:
+        self._symbol_index = SymbolIndex()
+        self._focus_anchor_on_next_block = False
+        self._rebuild_model(preserve_view=False)
+
+    def goto_address(self, address: int) -> None:
+        self._anchor_address = max(0, min(0xFFFFFFFF, int(address)))
+        # Navigation may center the requested symbol once. Refresh is a data
+        # update only and must never reuse this anchor to control scrolling.
+        self._focus_anchor_on_next_block = True
+        if self._contains_address(self._anchor_address):
+            self._rebuild_model(preserve_view=False, focus_anchor=True)
+            self._focus_anchor_on_next_block = False
+            return
+        self.refresh(force=True)
+
+    def refresh(self, *, force: bool = False) -> None:
+        if not self._connected:
+            return
+        window = plan_symbol_read_window(self._anchor_address)
+        cached = (
+            bool(self._block_data)
+            and self._block_start <= window.address
+            and self._block_start + len(self._block_data) >= window.address + window.size
+        )
+        if cached and not force:
+            # The local model is already current. In particular, do not rebuild
+            # just because a timer fired: rebuilding used to reset scroll/current
+            # selection and made Symbols View jump back to the navigation anchor.
+            return
+        self.read_requested.emit(window.address, window.size)
+
+    def set_block(self, address: int, data: bytes) -> None:
+        self._block_start = int(address)
+        self._block_data = bytes(data)
+        focus_anchor = self._focus_anchor_on_next_block
+        self._focus_anchor_on_next_block = False
+        self._rebuild_model(preserve_view=not focus_anchor, focus_anchor=focus_anchor)
+
+    def patch_bytes(self, address: int, data: bytes) -> None:
+        if not self._block_data:
+            return
+        payload = bytes(data)
+        start = self._block_start
+        end = start + len(self._block_data)
+        if int(address) >= end or int(address) + len(payload) <= start:
+            return
+        mutable = bytearray(self._block_data)
+        for i, value in enumerate(payload):
+            absolute = int(address) + i
+            if start <= absolute < end:
+                mutable[absolute - start] = value
+        self._block_data = bytes(mutable)
+        self._rebuild_model(preserve_view=True)
+
+    def _contains_address(self, address: int) -> bool:
+        return bool(self._block_data) and self._block_start <= int(address) < self._block_start + len(self._block_data)
+
+    def _raw_at(self, address: int, size: int) -> bytes | None:
+        index = int(address) - self._block_start
+        if index < 0 or index + int(size) > len(self._block_data):
+            return None
+        return self._block_data[index:index + int(size)]
+
+    def _fit_symbol_column(self) -> None:
+        fm = self.tree.fontMetrics()
+        width = fm.horizontalAdvance("Symbol") + 28
+        for row in range(self._model.rowCount()):
+            width = max(width, fm.horizontalAdvance(str(self._model.index(row, 1).data() or "")) + 28)
+        # Full paths are the point of this view. A generous cap keeps pathological
+        # template/debug names from consuming the entire screen; horizontal scroll
+        # remains available beyond the viewport.
+        self.tree.setColumnWidth(1, min(max(width, 360), 1000))
+        self.tree.setColumnWidth(0, 110)
+        self.tree.setColumnWidth(2, 110)
+        self.tree.setColumnWidth(3, 180)
+
+    def _rebuild_model(self, *, preserve_view: bool = True, focus_anchor: bool = False) -> None:
+        # Model rebuilds are local presentation work. Preserve the user's
+        # viewport/current selection across refreshes; only an explicit symbol
+        # navigation may center the anchor once.
+        vscroll = self.tree.verticalScrollBar().value() if preserve_view else 0
+        hscroll = self.tree.horizontalScrollBar().value() if preserve_view else 0
+        selected_name = ""
+        if preserve_view:
+            # Preserve only a *real selected row*, not merely QTreeView's current
+            # index. clearSelection() does not necessarily clear currentIndex(), and
+            # using currentIndex() here caused a cleared navigation highlight to be
+            # resurrected on the next Auto Refresh.
+            selected_rows = self.tree.selectionModel().selectedRows()
+            if selected_rows:
+                symbol = self._symbol_for_row(selected_rows[0].row())
+                selected_name = symbol.name if symbol is not None else ""
+
+        self._model.removeRows(0, self._model.rowCount())
+        if not self._symbol_index or not self._block_data:
+            return
+
+        start = self._block_start
+        end = start + len(self._block_data)
+        rows = self._symbol_index.scalar_starts_in_range(start, end, limit=512)
+        anchor_row = -1
+        nearest_distance: int | None = None
+        row_by_name: dict[str, int] = {}
+        for symbol in rows:
+            display_type = symbol_display_type(symbol.type_name)
+            if display_type is None:
+                continue
+            size = get_type_info(display_type).size
+            raw = self._raw_at(symbol.base_address, size)
+            value_text = "?"
+            if raw is not None:
+                try:
+                    value_text = format_display_value(raw, display_type)
+                except Exception:
+                    value_text = "?"
+
+            address_item = QStandardItem(f"0x{symbol.base_address:08X}")
+            symbol_item = QStandardItem(symbol.name)
+            type_item = QStandardItem(display_type)
+            value_item = QStandardItem(value_text)
+            for item in (address_item, symbol_item, type_item, value_item):
+                item.setEditable(False)
+            address_item.setData(symbol.name, Qt.ItemDataRole.UserRole)
+            model_row = self._model.rowCount()
+            self._model.appendRow([address_item, symbol_item, type_item, value_item])
+            row_by_name[symbol.name] = model_row
+
+            if symbol.base_address <= self._anchor_address < symbol.base_address + size:
+                anchor_row = model_row
+                nearest_distance = 0
+            elif nearest_distance != 0:
+                distance = abs(symbol.base_address - self._anchor_address)
+                if nearest_distance is None or distance < nearest_distance:
+                    nearest_distance = distance
+                    anchor_row = model_row
+
+        self._fit_symbol_column()
+
+        if focus_anchor and 0 <= anchor_row < self._model.rowCount():
+            # Explicit Symbol navigation is the one place where we intentionally
+            # center *and* highlight the destination so the user can immediately
+            # see which typed member was resolved. This is one-shot navigation
+            # presentation only; refresh never scrolls back to this anchor.
+            index = self._model.index(anchor_row, 0)
+            self.tree.setCurrentIndex(index)
+            self.tree.selectionModel().select(
+                index,
+                QItemSelectionModel.SelectionFlag.ClearAndSelect
+                | QItemSelectionModel.SelectionFlag.Rows,
+            )
+            self.tree.scrollTo(index, QAbstractItemView.ScrollHint.PositionAtCenter)
+            return
+
+        if preserve_view:
+            # Restore an actually selected row if it still exists. If the user
+            # cleared selection by clicking empty space, keep it cleared. Restore
+            # scroll positions last so selection restoration cannot move viewport.
+            row = row_by_name.get(selected_name, -1)
+            if 0 <= row < self._model.rowCount():
+                index = self._model.index(row, 0)
+                self.tree.setCurrentIndex(index)
+                self.tree.selectionModel().select(
+                    index,
+                    QItemSelectionModel.SelectionFlag.ClearAndSelect
+                    | QItemSelectionModel.SelectionFlag.Rows,
+                )
+            else:
+                self.tree.clearSelection()
+                self.tree.setCurrentIndex(QModelIndex())
+            self.tree.verticalScrollBar().setValue(vscroll)
+            self.tree.horizontalScrollBar().setValue(hscroll)
+
+    def eventFilter(self, watched, event):  # noqa: N802
+        if watched is self.tree.viewport() and event.type() == QEvent.Type.MouseButtonPress:
+            # A click on empty space means "nothing selected". Keep normal row
+            # clicks untouched so they select that row. This also clears the
+            # current index because QTreeView can retain currentIndex() even after
+            # clearSelection(), which would otherwise be restored on refresh.
+            position = event.position().toPoint()
+            if not self.tree.indexAt(position).isValid():
+                self.tree.clearSelection()
+                self.tree.setCurrentIndex(QModelIndex())
+        return super().eventFilter(watched, event)
+
+    def _symbol_for_row(self, row: int):
+        if row < 0 or row >= self._model.rowCount():
+            return None
+        item = self._model.item(row, 0)
+        name = str(item.data(Qt.ItemDataRole.UserRole) or "") if item is not None else ""
+        return self._symbol_index.exact_name(name) if name else None
+
+    def _current_symbol(self):
+        index = self.tree.currentIndex()
+        return self._symbol_for_row(index.row()) if index.isValid() else None
+
+    def _current_row_changed(self, current, _previous) -> None:
+        if not current.isValid():
+            return
+        symbol = self._symbol_for_row(current.row())
+        if symbol is None:
+            return
+        display_type = symbol_display_type(symbol.type_name)
+        if display_type is None:
+            return
+        size = get_type_info(display_type).size
+        raw = self._raw_at(symbol.base_address, size)
+        value_text = "?" if raw is None else format_display_value(raw, display_type)
+        raw_text = "" if raw is None else raw.hex(" ").upper()
+        self.selection_changed.emit(
+            f"0x{symbol.base_address:08X} | {symbol.name} | {display_type}: {value_text} | raw {raw_text}"
+        )
+
+    def _double_clicked(self, index) -> None:
+        symbol = self._symbol_for_row(index.row()) if index.isValid() else None
+        if symbol is None:
+            return
+        display_type = symbol_display_type(symbol.type_name)
+        if display_type is None:
+            return
+        size = get_type_info(display_type).size
+        raw = self._raw_at(symbol.base_address, size)
+        if raw is not None:
+            self.edit_requested.emit(symbol.base_address, display_type, raw)
+
+    def _show_context_menu(self, pos) -> None:
+        index = self.tree.indexAt(pos)
+        if index.isValid():
+            self.tree.setCurrentIndex(index)
+        symbol = self._current_symbol()
+        if symbol is None:
+            return
+        display_type = symbol_display_type(symbol.type_name)
+        if display_type is None:
+            return
+        menu = QMenu(self.tree)
+        edit_action = menu.addAction("Edit Value")
+        add_watch_action = menu.addAction("Add to Watch")
+        add_scope_action = menu.addAction("Add to Scope")
+        copy_symbol_action = menu.addAction("Copy Symbol")
+        chosen = menu.exec(self.tree.viewport().mapToGlobal(pos))
+        if chosen is edit_action:
+            size = get_type_info(display_type).size
+            raw = self._raw_at(symbol.base_address, size)
+            if raw is not None:
+                self.edit_requested.emit(symbol.base_address, display_type, raw)
+        elif chosen is add_watch_action:
+            self.add_watch_requested.emit(symbol.name, symbol.base_address, display_type)
+        elif chosen is add_scope_action:
+            self.add_scope_requested.emit(symbol.name, symbol.base_address, display_type)
+        elif chosen is copy_symbol_action:
+            QApplication.clipboard().setText(symbol.name)
+
+
+class MemoryExplorerPage(QWidget):
+    read_requested = Signal(object, int)
+    write_requested = Signal(object, object)
+    add_watch_requested = Signal(str, object, str)
+    add_scope_requested = Signal(str, object, str)
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._connected = False
+        self._current_address = DEFAULT_RAM_BASE
+        self._last_navigation_kind = "address"  # address | symbol
 
         layout = QVBoxLayout(self)
         toolbar = QHBoxLayout()
@@ -1216,7 +1659,8 @@ class MemoryExplorerPage(QWidget):
         # Symbol completion remains a separate AXF-backed QCompleter on the line
         # edit, so opening history never rebuilds/filter-scans the symbol model.
         self._navigation_history: list[str] = []
-        self.address_combo = QComboBox()
+        self._selected_history_query: str | None = None
+        self.address_combo = NavigationHistoryComboBox()
         self.address_combo.setEditable(True)
         self.address_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         self.address_combo.setMinimumWidth(320)
@@ -1229,11 +1673,13 @@ class MemoryExplorerPage(QWidget):
         self._history_model = QStandardItemModel(0, 3, self)
         self._history_model.setHorizontalHeaderLabels(["History", "Type", "Address"])
         history_popup = QTreeView()
+        self._history_popup = history_popup
         history_popup.setRootIsDecorated(False)
         history_popup.setAlternatingRowColors(True)
         history_popup.setUniformRowHeights(True)
         history_popup.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         history_popup.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        history_popup.installEventFilter(self)
         history_popup.setMinimumWidth(620)
         history_popup.setMinimumHeight(180)
         history_popup.setMaximumHeight(360)
@@ -1241,7 +1687,7 @@ class MemoryExplorerPage(QWidget):
         history_popup.setColumnWidth(1, 120)
         history_popup.setColumnWidth(2, 130)
         history_popup.header().setStretchLastSection(False)
-        history_popup.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        history_popup.header().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self.address_combo.setModel(self._history_model)
         self.address_combo.setView(history_popup)
         self.address_combo.setModelColumn(0)
@@ -1250,11 +1696,18 @@ class MemoryExplorerPage(QWidget):
         self.address_edit.setPlaceholderText(
             "0x20000000 或变量/成员，例如 BlowerParamsObj.m_PosSpeed、buffer[1]"
         )
-        self.address_edit.returnPressed.connect(self._goto)
-        self.address_combo.activated.connect(self._history_activated)
+        self.address_edit.returnPressed.connect(self._address_return_pressed)
+        self.address_edit.textEdited.connect(self._history_editor_text_edited)
+        self.address_combo.history_activated.connect(self._history_activated)
         toolbar.addWidget(self.address_combo)
+        self.delete_history_btn = QPushButton("Delete History")
+        self.delete_history_btn.setToolTip("删除当前选择/当前查询对应的单条历史；不改变当前 Memory 地址")
+        self.delete_history_btn.setEnabled(False)
+        self.delete_history_btn.clicked.connect(self._delete_selected_history)
+        toolbar.addWidget(self.delete_history_btn)
+
         self.clear_history_btn = QPushButton("Clear History")
-        self.clear_history_btn.setToolTip("清空 Memory Address / Symbol 查询历史")
+        self.clear_history_btn.setToolTip("清空全部 Memory Address / Symbol 查询历史")
         self.clear_history_btn.clicked.connect(self._clear_navigation_history)
         toolbar.addWidget(self.clear_history_btn)
 
@@ -1270,6 +1723,7 @@ class MemoryExplorerPage(QWidget):
         self._symbol_completer.setFilterMode(Qt.MatchFlag.MatchContains)
         self._symbol_completer.setMaxVisibleItems(14)
         completion_popup = QTreeView()
+        self._completion_popup = completion_popup
         completion_popup.setRootIsDecorated(False)
         completion_popup.setAlternatingRowColors(True)
         completion_popup.setUniformRowHeights(True)
@@ -1290,7 +1744,7 @@ class MemoryExplorerPage(QWidget):
         completion_popup.setColumnWidth(1, 130)
         completion_popup.setColumnWidth(2, 120)
         completion_popup.header().setStretchLastSection(False)
-        completion_popup.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        completion_popup.header().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self._symbol_completer.setPopup(completion_popup)
         self._symbol_completer.activated[str].connect(self._symbol_completion_activated)
         self.address_edit.setCompleter(self._symbol_completer)
@@ -1299,45 +1753,78 @@ class MemoryExplorerPage(QWidget):
         self.go_btn.clicked.connect(self._goto)
         toolbar.addWidget(self.go_btn)
         self.refresh_btn = QPushButton("Refresh")
-        self.refresh_btn.clicked.connect(lambda: self.view.refresh(force=True))
+        self.refresh_btn.clicked.connect(lambda: self._active_view().refresh(force=True))
         toolbar.addWidget(self.refresh_btn)
 
         self.auto_check = QCheckBox("Auto Refresh")
         self.auto_check.toggled.connect(self._auto_toggled)
         toolbar.addWidget(self.auto_check)
-        self.auto_interval = QSpinBox()
-        self.auto_interval.setRange(250, 10000)
-        self.auto_interval.setValue(1000)
-        self.auto_interval.setSuffix(" ms")
+        self.auto_interval = IntPresetComboBox(
+            [100, 200, 500, 1000, 2000, 5000],
+            value=1000,
+            minimum=100,
+            maximum=10000,
+            suffix="ms",
+        )
+        self.auto_interval.setToolTip(
+            "Memory auto-refresh presets; type a custom 100..10000 ms interval when needed"
+        )
         self.auto_interval.valueChanged.connect(self._auto_interval_changed)
         toolbar.addWidget(self.auto_interval)
+
+        toolbar.addWidget(QLabel("View"))
+        self.view_mode_combo = QComboBox(self)
+        self.view_mode_combo.addItem("Auto", "auto")
+        self.view_mode_combo.addItem("Raw", "raw")
+        self.view_mode_combo.addItem("Symbols", "symbols")
+        self.view_mode_combo.setToolTip(
+            "Auto: Symbol navigation uses typed Symbol rows; raw-address navigation uses the CE-style Raw view"
+        )
+        self.view_mode_combo.currentIndexChanged.connect(self._view_mode_changed)
+        toolbar.addWidget(self.view_mode_combo)
         toolbar.addStretch(1)
         layout.addLayout(toolbar)
 
+        # Keep ``self.view`` as the Raw/Hex view for compatibility with existing
+        # callers/tests. The stack adds a typed semantic view without changing the
+        # single J-Link read/write ownership model.
         self.view = HexMemoryView(self)
-        self.view.read_requested.connect(self.read_requested.emit)
-        self.view.write_requested.connect(self.write_requested.emit)
-        self.view.edit_requested.connect(self._edit_requested)
+        self.symbol_view = SymbolMemoryView(self)
+        for memory_view in (self.view, self.symbol_view):
+            memory_view.read_requested.connect(self.read_requested.emit)
+            memory_view.write_requested.connect(self.write_requested.emit)
+            memory_view.edit_requested.connect(self._edit_requested)
+            memory_view.add_watch_requested.connect(self.add_watch_requested.emit)
+            memory_view.add_scope_requested.connect(self.add_scope_requested.emit)
+            memory_view.selection_changed.connect(self._selection_changed)
         self.view.text_edit_requested.connect(self._text_edit_requested)
-        self.view.add_watch_requested.connect(self.add_watch_requested.emit)
-        self.view.selection_changed.connect(self._selection_changed)
-        layout.addWidget(self.view, 1)
+
+        self.view_stack = QStackedWidget(self)
+        self.view_stack.addWidget(self.view)
+        self.view_stack.addWidget(self.symbol_view)
+        layout.addWidget(self.view_stack, 1)
+        self._apply_view_mode(refresh=False)
 
         self.status_label = QLabel(
             "单击选择；拖动/Shift 选择内存块；Byte 视图直接键入两个十六进制字符即可写入；"
             "Text 区可直接键入文本；双击弹窗编辑；Ctrl+C/Ctrl+V；Address / Symbol 可输入地址、变量、"
-            "结构体成员或数组成员（如 buffer[1]），输入时本地过滤，回车跳转；Symbol 跳转会自动采用其标量类型；成功查询会记入带 Type/Address 的下拉历史，可手动清空；F5 刷新，Ctrl+G 跳转。"
+            "结构体成员或数组成员（如 buffer[1]），输入时本地过滤，回车跳转；Symbol 跳转会自动采用其标量类型；成功查询会记入带 Type/Address 的下拉历史；选择历史项后可用 Delete History 单独删除，也可 Clear History 全清；F5 刷新，Ctrl+G 跳转。"
         )
         self.status_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         layout.addWidget(self.status_label)
 
         self._auto_timer = QTimer(self)
-        self._auto_timer.timeout.connect(lambda: self.view.refresh(force=True))
+        self._auto_timer.timeout.connect(lambda: self._active_view().refresh(force=True))
         self._update_enabled()
 
     def set_connected(self, connected: bool) -> None:
         self._connected = bool(connected)
-        self.view.set_connected(connected)
+        # Set passive connection state on both renderers, then issue at most one
+        # visible read from the active mode.
+        self.view.set_connected(connected, refresh=False)
+        self.symbol_view.set_connected(connected)
+        if self._connected:
+            self._active_view().refresh(force=True)
         self._update_enabled()
         self._auto_toggled(self.auto_check.isChecked())
 
@@ -1347,6 +1834,7 @@ class MemoryExplorerPage(QWidget):
         records = tuple(symbols)
         self._symbol_index = SymbolIndex(records)
         self.view.set_symbols(records)
+        self.symbol_view.set_symbols(records)
         self._rebuild_symbol_completion_model()
         # Type/address columns in the small MRU popup are resolved from the
         # latest AXF/DWARF index, so a reloaded image never leaves stale types.
@@ -1356,17 +1844,50 @@ class MemoryExplorerPage(QWidget):
         self._symbol_index = SymbolIndex()
         self._install_symbol_completion_model(())
         self.view.clear_symbols()
+        self.symbol_view.clear_symbols()
+        self._apply_view_mode(refresh=False)
         self._sync_navigation_history_combo()
 
     def set_block(self, address: int, data: bytes) -> None:
+        # One worker block read feeds both renderers. The inactive renderer only
+        # updates local cache/model and never initiates target I/O.
         self.view.set_block(address, data)
+        self.symbol_view.set_block(address, data)
 
     def patch_bytes(self, address: int, data: bytes) -> None:
         self.view.patch_bytes(address, data)
+        self.symbol_view.patch_bytes(address, data)
 
-    def goto_address(self, address: int) -> None:
-        self.address_edit.setText(f"0x{int(address):08X}")
-        self.view.goto_address(int(address))
+    def goto_address(self, address: int, *, display_text: str | None = None) -> None:
+        address = int(address)
+        self._current_address = address
+        shown = str(display_text).strip() if display_text is not None else f"0x{address:08X}"
+        self.address_combo.setEditText(shown)
+        self._apply_view_mode(refresh=False)
+        self._active_view().goto_address(address)
+
+    def open_symbol_location(self, name: str, address: int, type_name: str = "") -> None:
+        """Open a Watch/Scope symbol in the most useful Memory renderer.
+
+        An exact AXF/DWARF name+address uses the semantic Symbols view in Auto
+        mode. Manually named rows still open the raw address without guessing a
+        Symbol identity. This is presentation/navigation only; target I/O remains
+        delegated to the existing active Memory view and single J-Link worker.
+        """
+        address = max(0, min(0xFFFFFFFF, int(address)))
+        clean_name = str(name).strip()
+        symbol = self._symbol_index.exact_name(clean_name) if clean_name and self._symbol_index else None
+        if symbol is not None and int(symbol.base_address) == address:
+            self._goto_symbol(symbol, remember=False)
+            return
+
+        display_type = symbol_display_type(type_name)
+        if display_type is not None:
+            self.view.set_display_type(display_type)
+        self._last_navigation_kind = "address"
+        self.goto_address(address, display_text=f"0x{address:08X}")
+        if clean_name:
+            self.status_label.setText(f"{clean_name} → 0x{address:08X} | {type_name or 'unknown'}")
 
     def settings_state(self) -> dict:
         state = self.view.settings_state()
@@ -1375,6 +1896,7 @@ class MemoryExplorerPage(QWidget):
                 "auto_refresh": self.auto_check.isChecked(),
                 "auto_interval_ms": self.auto_interval.value(),
                 "navigation_history": list(self._navigation_history),
+                "view_mode": str(self.view_mode_combo.currentData() or "auto"),
             }
         )
         return state
@@ -1383,6 +1905,12 @@ class MemoryExplorerPage(QWidget):
         if not isinstance(state, dict):
             return
         self.view.load_settings_state(state)
+        view_mode = str(state.get("view_mode", "auto") or "auto").strip().lower()
+        mode_index = self.view_mode_combo.findData(view_mode)
+        if mode_index >= 0:
+            self.view_mode_combo.blockSignals(True)
+            self.view_mode_combo.setCurrentIndex(mode_index)
+            self.view_mode_combo.blockSignals(False)
         saved_history = state.get("navigation_history", [])
         if isinstance(saved_history, (list, tuple)):
             self._navigation_history = []
@@ -1393,7 +1921,9 @@ class MemoryExplorerPage(QWidget):
                 self._navigation_history = update_navigation_history(
                     self._navigation_history, str(item), max_items=50
                 )
+            self._selected_history_query = None
             self._sync_navigation_history_combo()
+            self._update_delete_history_button()
         # V0.5.1 intentionally does not restore a stale previous address. Every
         # new application session starts at the MCU SRAM base for a useful first
         # view; navigation history is restored independently for quick reuse.
@@ -1402,38 +1932,72 @@ class MemoryExplorerPage(QWidget):
         self.auto_check.setChecked(bool(state.get("auto_refresh", False)))
 
     def _goto(self) -> None:
-        text = self.address_edit.text().strip()
+        # Go is deterministic: it resolves exactly what is in the editor.
+        # Choosing a completion is handled only by QCompleter.activated.
+        self._navigate_query(self.address_edit.text(), allow_completion_fallback=False)
+
+    def _address_return_pressed(self) -> None:
+        """Handle raw/exact editor Enter without competing with QCompleter.
+
+        When the Symbol completion popup is visible, QCompleter owns Enter and
+        emits the exact selected Symbol through ``activated[str]``. We deliberately
+        do nothing here so QComboBox history/current-index state cannot run a
+        second navigation afterwards. If no completion popup is active, Enter
+        resolves the editor text as an exact Symbol or raw address only.
+        """
+        popup = self._symbol_completer.popup()
+        if popup is not None and popup.isVisible():
+            return
+        self._navigate_query(self.address_edit.text(), allow_completion_fallback=False)
+
+    def _navigate_query(self, query: str, *, allow_completion_fallback: bool = False) -> None:
+        text = str(query).strip()
         if not text:
             self.status_label.setText("Address / Symbol is empty")
             return
 
-        # Numeric addresses keep the old path. When parsing fails, interpret the
-        # same field as an AXF/DWARF symbolic path. Exact array/member paths such
-        # as foo[1] or obj.member[2] work because the parser already flattens
-        # those records to their real MCU addresses.
+        # Exact Symbol/member names always win. Symbol navigation preserves the
+        # full human-readable path in the editor; raw numeric navigation alone
+        # is canonicalized to 0xXXXXXXXX.
+        symbol = self._symbol_index.exact_name(text) if self._symbol_index else None
+        if symbol is not None:
+            self._goto_symbol(symbol, remember=True)
+            return
+
+        # ``allow_completion_fallback`` is retained only for source compatibility
+        # with older callers. V0.6.8 intentionally never guesses a candidate from
+        # popup/current-index state; QCompleter.activated is the single completion
+        # commit path.
+        _ = allow_completion_fallback
+
         try:
             address = parse_address(text)
         except Exception as address_error:
-            symbol = self._symbol_index.exact_name(text)
-            if symbol is None:
-                # If the user typed only a filter fragment and presses Enter, use
-                # the currently highlighted/first QCompleter result. This mirrors
-                # the Watch symbol filter without rebuilding the symbol model.
-                completion = self._symbol_completer.currentCompletion().strip()
-                if completion:
-                    symbol = self._symbol_index.exact_name(completion)
-            if symbol is None:
-                if re.fullmatch(r"(?:0[xX])?[0-9A-Fa-f]+", text):
-                    self.status_label.setText(str(address_error))
-                elif self._symbol_index:
-                    self.status_label.setText(f"Symbol not found: {text}")
-                else:
-                    self.status_label.setText("No AXF/ELF symbols loaded")
-                return
-            self._goto_symbol(symbol, remember=True)
+            if re.fullmatch(r"(?:0[xX])?[0-9A-Fa-f]+", text):
+                self.status_label.setText(str(address_error))
+            elif self._symbol_index:
+                self.status_label.setText(f"Symbol not found: {text}")
+            else:
+                self.status_label.setText("No AXF/ELF symbols loaded")
             return
-        self._remember_navigation_query(f"0x{address:08X}")
-        self.goto_address(address)
+
+        canonical = f"0x{address:08X}"
+        self._last_navigation_kind = "address"
+        self._remember_navigation_query(canonical)
+        self.goto_address(address, display_text=canonical)
+
+    def eventFilter(self, watched, event):  # noqa: N802
+        # Delete remains a keyboard shortcut for the highlighted history row; the
+        # primary single-item removal UX is the persistent Delete History button,
+        # because a context menu inside a QComboBox popup can disappear on Windows.
+        if watched is self._history_popup and event.type() == QEvent.Type.KeyPress:
+            if event.key() == Qt.Key.Key_Delete:
+                index = self._history_popup.currentIndex()
+                if index.isValid():
+                    self._delete_history_row(index.row())
+                    event.accept()
+                    return True
+        return super().eventFilter(watched, event)
 
     def _history_metadata(self, query: str) -> tuple[str, str]:
         """Resolve display-only history metadata without target I/O."""
@@ -1469,6 +2033,7 @@ class MemoryExplorerPage(QWidget):
                 self._history_model.appendRow(row)
             self.address_combo.setCurrentIndex(-1)
             self.address_combo.setEditText(current_text)
+            self._auto_fit_popup_columns(self._history_popup, self._history_model, symbol_column=0)
         finally:
             self.address_combo.blockSignals(False)
 
@@ -1476,27 +2041,138 @@ class MemoryExplorerPage(QWidget):
         self._navigation_history = update_navigation_history(
             self._navigation_history, query, max_items=50
         )
+        # A newly typed successful query becomes the active history item. This
+        # lets the visible Delete History button remove it immediately without
+        # requiring the history popup to stay open.
+        self._selected_history_query = str(query).strip() or None
         self._sync_navigation_history_combo()
+        self._update_delete_history_button()
+
+    def _update_delete_history_button(self) -> None:
+        selected = str(self._selected_history_query or "").strip()
+        exists = bool(selected) and any(
+            str(item).strip().casefold() == selected.casefold()
+            for item in self._navigation_history
+        )
+        self.delete_history_btn.setEnabled(exists)
+
+    def _history_editor_text_edited(self, text: str) -> None:
+        # Typing after a history selection must not leave a hidden stale delete
+        # target. Enable single-delete only when the editor currently matches an
+        # existing history entry; the list is bounded to 50 so this is trivial.
+        key = str(text).strip().casefold()
+        self._selected_history_query = next(
+            (item for item in self._navigation_history if str(item).strip().casefold() == key),
+            None,
+        ) if key else None
+        self._update_delete_history_button()
 
     def _clear_navigation_history(self) -> None:
         current_text = self.address_edit.text()
         self._navigation_history.clear()
+        self._selected_history_query = None
         self._sync_navigation_history_combo()
+        self._update_delete_history_button()
         self.address_combo.setEditText(current_text)
         self.status_label.setText("Address / Symbol history cleared")
 
-    def _history_activated(self, index: int) -> None:
-        # PySide6/Qt6 exposes QComboBox.activated as activated(int).
-        # The old Qt/PyQt-style activated[str] overload is not available and
-        # raises IndexError during widget construction on the user's runtime.
-        # Resolve the selected MRU text from the activated index instead.
-        if index < 0 or index >= self.address_combo.count():
+    def _delete_selected_history(self) -> None:
+        query = str(self._selected_history_query or "").strip()
+        if not query:
+            self.status_label.setText("Select a history item first")
             return
-        query = self.address_combo.itemText(index).strip()
+        current_text = self.address_edit.text()
+        key = query.casefold()
+        self._navigation_history = [
+            value for value in self._navigation_history
+            if str(value).strip().casefold() != key
+        ]
+        self._selected_history_query = None
+        self._sync_navigation_history_combo()
+        self._update_delete_history_button()
+        self.address_combo.setEditText(current_text)
+        self.status_label.setText(f"History removed: {query}")
+
+    def _delete_history_row(self, row: int) -> None:
+        if row < 0 or row >= self._history_model.rowCount():
+            return
+        item = self._history_model.item(row, 0)
+        query = item.text().strip() if item is not None else ""
         if not query:
             return
-        self.address_combo.setEditText(query)
-        self._goto()
+        current_text = self.address_edit.text()
+        key = query.casefold()
+        self._navigation_history = [
+            value for value in self._navigation_history
+            if str(value).strip().casefold() != key
+        ]
+        if str(self._selected_history_query or "").strip().casefold() == key:
+            self._selected_history_query = None
+        self._sync_navigation_history_combo()
+        self._update_delete_history_button()
+        self.address_combo.setEditText(current_text)
+        self.status_label.setText(f"History removed: {query}")
+
+    def _show_history_context_menu(self, pos) -> None:
+        index = self._history_popup.indexAt(pos)
+        if not index.isValid():
+            return
+        self._history_popup.setCurrentIndex(index)
+        menu = QMenu(self._history_popup)
+        delete_action = menu.addAction("Delete This History")
+        chosen = menu.exec(self._history_popup.viewport().mapToGlobal(pos))
+        if chosen is delete_action:
+            self._delete_history_row(index.row())
+
+    def _history_activated(self, index: int) -> None:
+        # History selection is navigation-only: it must NOT reinsert/move the
+        # selected entry in the history list. Keeping order stable makes the
+        # dropdown predictable and also gives the visible Delete History button
+        # a deterministic item to remove after the popup closes.
+        if index < 0 or index >= self._history_model.rowCount():
+            return
+        item = self._history_model.item(index, 0)
+        query = item.text().strip() if item is not None else ""
+        if not query:
+            return
+        self._selected_history_query = query
+        self._update_delete_history_button()
+
+        symbol = self._symbol_index.exact_name(query) if self._symbol_index else None
+        if symbol is not None:
+            self._goto_symbol(symbol, remember=False)
+            return
+        try:
+            address = parse_address(query)
+        except ValueError:
+            self.status_label.setText(f"History target unavailable: {query}")
+            return
+        self._last_navigation_kind = "address"
+        self.goto_address(address, display_text=f"0x{address:08X}")
+
+    def _auto_fit_popup_columns(self, view: QTreeView, model: QStandardItemModel, *, symbol_column: int = 0) -> None:
+        """Fit Symbol/Type/Address popups to full names without per-key work."""
+        fm = view.fontMetrics()
+        widths = [0] * model.columnCount()
+        for col in range(model.columnCount()):
+            header = str(model.headerData(col, Qt.Orientation.Horizontal) or "")
+            widths[col] = fm.horizontalAdvance(header) + 28
+        for row in range(model.rowCount()):
+            for col in range(model.columnCount()):
+                text = str(model.index(row, col).data() or "")
+                widths[col] = max(widths[col], fm.horizontalAdvance(text) + 28)
+        if widths:
+            # Full Symbol names are prioritized; cap only pathological DWARF names.
+            widths[symbol_column] = min(max(widths[symbol_column], 330), 900)
+        if len(widths) > 1:
+            widths[1] = min(max(widths[1], 100), 180)
+        if len(widths) > 2:
+            widths[2] = min(max(widths[2], 120), 160)
+        total = 36
+        for col, width in enumerate(widths):
+            view.setColumnWidth(col, width)
+            total += width
+        view.setMinimumWidth(min(max(total, 620), 1240))
 
     def _rebuild_symbol_completion_model(self) -> None:
         self._install_symbol_completion_model(self._symbol_index.preferred_symbols())
@@ -1517,6 +2193,7 @@ class MemoryExplorerPage(QWidget):
         old_model = self._symbol_completion_model
         self._symbol_completion_model = model
         self._symbol_completer.setModel(model)
+        self._auto_fit_popup_columns(self._completion_popup, model, symbol_column=0)
         if old_model is not model:
             old_model.deleteLater()
 
@@ -1528,17 +2205,40 @@ class MemoryExplorerPage(QWidget):
     def _goto_symbol(self, symbol, *, remember: bool = False) -> None:
         if remember:
             self._remember_navigation_query(symbol.name)
+        self._last_navigation_kind = "symbol"
         # Exact scalar symbols carry a normalized AXF/DWARF type. Adopt that
         # type immediately so the first Memory frame at the destination is
         # interpreted correctly (e.g. uint8 -> UInt8 instead of Byte/Hex).
         display_type = symbol_display_type(symbol.type_name)
         if display_type is not None:
             self.view.set_display_type(display_type)
-        self.goto_address(symbol.base_address)
+        self.goto_address(symbol.base_address, display_text=symbol.name)
         type_text = symbol.type_name or symbol.kind or "unknown"
         self.status_label.setText(
             f"{symbol.name} → 0x{symbol.base_address:08X} | {type_text} | {symbol.size} B"
         )
+
+    def _active_view(self):
+        return self.symbol_view if self.view_stack.currentWidget() is self.symbol_view else self.view
+
+    def _effective_view_mode(self) -> str:
+        requested = str(self.view_mode_combo.currentData() or "auto")
+        if requested in {"raw", "symbols"}:
+            return requested
+        # Auto is deliberately stable rather than heuristically flipping while
+        # scrolling: Symbol/name navigation opens semantic typed rows; explicit
+        # numeric-address navigation keeps the classic CE-style raw memory view.
+        return "symbols" if self._last_navigation_kind == "symbol" and bool(self._symbol_index) else "raw"
+
+    def _apply_view_mode(self, *, refresh: bool = True) -> None:
+        mode = self._effective_view_mode()
+        target = self.symbol_view if mode == "symbols" else self.view
+        self.view_stack.setCurrentWidget(target)
+        if refresh and self._connected:
+            target.goto_address(self._current_address)
+
+    def _view_mode_changed(self, _index: int) -> None:
+        self._apply_view_mode(refresh=True)
 
     def _selection_changed(self, text: str) -> None:
         if text:

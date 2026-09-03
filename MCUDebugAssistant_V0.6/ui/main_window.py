@@ -20,8 +20,8 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QPlainTextEdit,
-    QSpinBox,
     QTabWidget,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -34,7 +34,11 @@ from ui.symbol_browser import SymbolBrowserDialog
 from ui.scope_page import ScopePage
 from ui.memory_explorer import MemoryExplorerPage
 from ui.automation_page import TestAutomationPage
+from ui.preset_combo import IntPresetComboBox
 from symbols.elf_parser import ElfParseResult, parse_elf_symbols
+
+
+WATCH_INTERVAL_PRESETS_MS = [10, 20, 50, 100, 200, 500, 1000, 2000]
 
 
 JLINK_SPEED_PRESETS_KHZ = [
@@ -66,7 +70,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("MCU Debug Assistant V0.6.6 - Symbol Typed Memory Navigation")
+        self.setWindowTitle("MCU Debug Assistant V0.6.16 - AI Documentation Layout")
         self.resize(1220, 820)
         # Keep the window genuinely user-resizable. Scope controls are wrapped
         # into two rows in V0.3.13 so this smaller minimum width is practical.
@@ -126,7 +130,8 @@ class MainWindow(QMainWindow):
         root = QWidget(self)
         self.setCentralWidget(root)
         layout = QVBoxLayout(root)
-        layout.addWidget(self._build_connection_group())
+        self.connection_group = self._build_connection_group()
+        layout.addWidget(self.connection_group)
 
         self.tabs = QTabWidget()
         self.tabs.addTab(self._build_watch_page(), "Watch")
@@ -134,9 +139,12 @@ class MainWindow(QMainWindow):
         self.scope_page.start_requested.connect(self._start_scope_sampling)
         self.scope_page.stop_requested.connect(lambda: self.stop_scope_requested.emit())
         self.scope_page.add_symbol_requested.connect(self._open_scope_symbol_browser)
+        self.scope_page.open_memory_requested.connect(self._open_symbol_in_memory)
+        self.scope_page.add_watch_requested.connect(self._add_memory_address_to_watch)
         self.scope_page.log_requested.connect(self._log)
         self.tabs.addTab(self.scope_page, "Scope")
-        self.tabs.addTab(self._build_manual_memory_page(), "Memory")
+        self.memory_page = self._build_manual_memory_page()
+        self.tabs.addTab(self.memory_page, "Memory")
         self.test_automation_page = TestAutomationPage(self)
         self.test_automation_page.snapshot_requested.connect(self.automation_snapshot_requested.emit)
         self.test_automation_page.write_requested.connect(self.automation_write_requested.emit)
@@ -160,7 +168,29 @@ class MainWindow(QMainWindow):
     # ---------- Connection ----------
     def _build_connection_group(self) -> QGroupBox:
         box = QGroupBox("J-Link Connection")
-        grid = QGridLayout(box)
+        outer = QVBoxLayout(box)
+
+        # Keep a one-line connection summary visible even when the configuration
+        # controls are collapsed. This reclaims vertical space after a successful
+        # connect while still leaving Disconnect immediately available.
+        header = QHBoxLayout()
+        self.connection_toggle_btn = QToolButton()
+        self.connection_toggle_btn.setText("−")
+        self.connection_toggle_btn.setFixedSize(26, 26)
+        self.connection_toggle_btn.setToolTip("Collapse J-Link connection settings")
+        self.connection_toggle_btn.clicked.connect(self._toggle_connection_details)
+        self.status_label = QLabel("Disconnected")
+        self.status_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.disconnect_btn = QPushButton("Disconnect")
+        self.disconnect_btn.clicked.connect(lambda: self.disconnect_requested.emit())
+        header.addWidget(self.connection_toggle_btn)
+        header.addWidget(self.status_label, 1)
+        header.addWidget(self.disconnect_btn)
+        outer.addLayout(header)
+
+        self.connection_details = QWidget()
+        grid = QGridLayout(self.connection_details)
+        grid.setContentsMargins(0, 0, 0, 0)
 
         self.dll_dir_edit = QLineEdit()
         self.dll_dir_btn = QPushButton("目录...")
@@ -184,9 +214,6 @@ class MainWindow(QMainWindow):
 
         self.connect_btn = QPushButton("Connect")
         self.connect_btn.clicked.connect(self._connect)
-        self.disconnect_btn = QPushButton("Disconnect")
-        self.disconnect_btn.clicked.connect(lambda: self.disconnect_requested.emit())
-        self.status_label = QLabel("Disconnected")
 
         grid.addWidget(QLabel("J-Link目录"), 0, 0)
         grid.addWidget(self.dll_dir_edit, 0, 1, 1, 4)
@@ -202,10 +229,24 @@ class MainWindow(QMainWindow):
         grid.addWidget(QLabel("Speed"), 2, 2)
         grid.addWidget(self.speed_combo, 2, 3)
         grid.addWidget(QLabel("kHz"), 2, 4)
-        grid.addWidget(self.connect_btn, 2, 5)
-        grid.addWidget(self.disconnect_btn, 2, 6)
-        grid.addWidget(self.status_label, 3, 0, 1, 7)
+        grid.addWidget(self.connect_btn, 2, 5, 1, 2)
+        outer.addWidget(self.connection_details)
+        self._connection_collapsed = False
         return box
+
+    def _set_connection_details_collapsed(self, collapsed: bool) -> None:
+        self._connection_collapsed = bool(collapsed)
+        if hasattr(self, "connection_details"):
+            self.connection_details.setVisible(not self._connection_collapsed)
+        if hasattr(self, "connection_toggle_btn"):
+            self.connection_toggle_btn.setText("+" if self._connection_collapsed else "−")
+            self.connection_toggle_btn.setToolTip(
+                "Expand J-Link connection settings" if self._connection_collapsed
+                else "Collapse J-Link connection settings"
+            )
+
+    def _toggle_connection_details(self) -> None:
+        self._set_connection_details_collapsed(not self._connection_collapsed)
 
     # ---------- Watch ----------
     def _build_watch_page(self) -> QWidget:
@@ -217,10 +258,15 @@ class MainWindow(QMainWindow):
         self.watch_add_btn.clicked.connect(self._add_watch_variable)
         self.watch_remove_btn = QPushButton("删除变量")
         self.watch_remove_btn.clicked.connect(self._remove_watch_variable)
-        self.sample_interval_spin = QSpinBox()
-        self.sample_interval_spin.setRange(1, 60000)
-        self.sample_interval_spin.setValue(100)
-        self.sample_interval_spin.setSuffix(" ms")
+        # Watch polling is normally used at a small set of engineering cadences.
+        # Use an editable preset combo instead of +/- single-step arrows: common
+        # values are one click away, while unusual 1..60000 ms values remain valid.
+        self.sample_interval_spin = IntPresetComboBox(
+            WATCH_INTERVAL_PRESETS_MS, value=100, minimum=1, maximum=60000, suffix="ms"
+        )
+        self.sample_interval_spin.setToolTip(
+            "Watch polling interval presets; type a custom 1..60000 ms value when needed"
+        )
         self.sample_interval_spin.valueChanged.connect(self._sampling_interval_changed)
         self.sample_rate_label = QLabel("10 Hz")
         self.actual_rate_label = QLabel("Actual: -")
@@ -277,6 +323,8 @@ class MainWindow(QMainWindow):
         self.watch_table = WatchTable()
         self.watch_table.definition_changed.connect(self._watch_definition_changed)
         self.watch_table.write_requested.connect(self._write_watch_row)
+        self.watch_table.add_scope_requested.connect(self._add_symbol_to_scope)
+        self.watch_table.open_memory_requested.connect(self._open_symbol_in_memory)
         layout.addWidget(self.watch_table, 1)
         return page
 
@@ -325,6 +373,7 @@ class MainWindow(QMainWindow):
         self.memory_explorer.read_requested.connect(self._request_memory_block)
         self.memory_explorer.write_requested.connect(self._write_memory_block)
         self.memory_explorer.add_watch_requested.connect(self._add_memory_address_to_watch)
+        self.memory_explorer.add_scope_requested.connect(self._add_symbol_to_scope)
         layout.addWidget(self.memory_explorer, 1)
         return page
 
@@ -638,6 +687,11 @@ class MainWindow(QMainWindow):
         self._connected = connected
         self._update_connection_ui(connected)
         self.status_label.setText(message)
+        # Connected sessions normally do not need the configuration controls.
+        # Collapse automatically to leave more room for Watch/Scope/Memory/Test,
+        # but keep the + button available for inspection. Disconnect expands the
+        # panel again so the next target can be configured immediately.
+        self._set_connection_details_collapsed(bool(connected))
         if hasattr(self, "scope_page"):
             self.scope_page.set_connected(connected)
         self._log(message)
@@ -722,6 +776,33 @@ class MainWindow(QMainWindow):
             self.memory_block_write_requested.emit(request_id, address, payload)
         except Exception as exc:
             self._show_error("Memory write failed", exc)
+
+    def _add_symbol_to_scope(self, name: str, address: int, type_name: str) -> None:
+        try:
+            address = int(address)
+            if type_name not in supported_types():
+                type_name = "uint8"
+            if self.scope_page.source_combo.currentText().upper() != "HSS":
+                self._log("Add to Scope skipped: RTT channels are target-defined")
+                return
+            if self.scope_page.add_symbol(name, address, type_name):
+                self._log(f"Symbol -> Scope: added {name} @ 0x{address:08X} ({type_name})")
+            else:
+                self._log(
+                    f"Symbol -> Scope: skipped {name} @ 0x{address:08X} "
+                    "(already present or Scope is sampling)"
+                )
+        except Exception as exc:
+            self._show_error("Add Scope failed", exc)
+
+    def _open_symbol_in_memory(self, name: str, address: int, type_name: str) -> None:
+        try:
+            address = int(address)
+            self.tabs.setCurrentWidget(self.memory_page)
+            self.memory_explorer.open_symbol_location(name, address, type_name)
+            self._log(f"Symbol -> Memory: {name} @ 0x{address:08X} ({type_name})")
+        except Exception as exc:
+            self._show_error("Open Memory failed", exc)
 
     def _add_memory_address_to_watch(self, name: str, address: int, type_name: str) -> None:
         try:

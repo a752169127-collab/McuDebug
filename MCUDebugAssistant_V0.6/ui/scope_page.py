@@ -10,11 +10,12 @@ from datetime import datetime
 import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCore import Qt, Signal, QTimer
-from PySide6.QtGui import QBrush, QColor, QIntValidator
+from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
     QComboBox,
+    QApplication,
     QColorDialog,
     QFileDialog,
     QGridLayout,
@@ -24,7 +25,6 @@ from PySide6.QtWidgets import (
     QFrame,
     QMenu,
     QPushButton,
-    QSpinBox,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
@@ -39,6 +39,7 @@ from core.render_cache import ScopeRenderCache
 from core.presentation_pacer import PresentationPacer
 from core.follow_clock import FollowPresentationClock
 from core.latency_guard import LiveLatencyGuard
+from ui.preset_combo import IntPresetComboBox
 from core.lane_mapper import (
     lane_axis_ticks,
     lane_bounds,
@@ -52,6 +53,8 @@ from core.lane_mapper import (
 class ScopeChannelTable(QTableWidget):
     definition_changed = Signal()
     display_changed = Signal(object)
+    open_memory_requested = Signal(str, object, str)
+    add_watch_requested = Signal(str, object, str)
     visibility_changed = Signal(object)
     selected_channel_changed = Signal(object)
     command_requested = Signal(str)
@@ -99,6 +102,8 @@ class ScopeChannelTable(QTableWidget):
         self.itemChanged.connect(self._item_changed)
         self.itemSelectionChanged.connect(self._emit_selected)
         self.cellDoubleClicked.connect(self._cell_double_clicked)
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._show_context_menu)
 
     def _item_changed(self, item: QTableWidgetItem) -> None:
         if self._internal_update:
@@ -301,6 +306,61 @@ class ScopeChannelTable(QTableWidget):
                 if color.isValid():
                     return color.name()
         return self.DEFAULT_COLORS[(max(1, int(channel_id)) - 1) % len(self.DEFAULT_COLORS)]
+
+    def _row_symbol_info(self, row: int) -> tuple[str, int, str] | None:
+        if row < 0 or row >= self.rowCount():
+            return None
+        name_item = self.item(row, self.COL_NAME)
+        address_item = self.item(row, self.COL_ADDRESS)
+        combo = self.cellWidget(row, self.COL_TYPE)
+        if name_item is None or address_item is None or not isinstance(combo, QComboBox):
+            return None
+        name = name_item.text().strip()
+        try:
+            address = int(address_item.text().strip(), 0)
+        except ValueError:
+            return None
+        if not name or not 0 <= address <= 0xFFFFFFFF:
+            return None
+        type_name = combo.currentText().strip()
+        if type_name not in supported_types():
+            return None
+        return name, address, type_name
+
+    def _show_context_menu(self, pos) -> None:
+        index = self.indexAt(pos)
+        if not index.isValid():
+            return
+        row = index.row()
+        if not self.selectionModel().isRowSelected(row, self.rootIndex()):
+            self.clearSelection()
+            self.selectRow(row)
+        self.setCurrentCell(row, index.column())
+        info = self._row_symbol_info(row)
+
+        menu = QMenu(self)
+        open_memory_action = menu.addAction("Open in Memory")
+        add_watch_action = menu.addAction("Add to Watch")
+        menu.addSeparator()
+        copy_symbol_action = menu.addAction("Copy Symbol")
+        valid_symbol_address = info is not None and not self._rtt_mode
+        open_memory_action.setEnabled(valid_symbol_address)
+        add_watch_action.setEnabled(valid_symbol_address)
+        copy_symbol_action.setEnabled(info is not None or self.item(row, self.COL_NAME) is not None)
+        chosen = menu.exec(self.viewport().mapToGlobal(pos))
+
+        if chosen is copy_symbol_action:
+            name_item = self.item(row, self.COL_NAME)
+            if name_item is not None:
+                QApplication.clipboard().setText(name_item.text().strip())
+            return
+        if info is None or self._rtt_mode:
+            return
+        name, address, type_name = info
+        if chosen is open_memory_action:
+            self.open_memory_requested.emit(name, address, type_name)
+        elif chosen is add_watch_action:
+            self.add_watch_requested.emit(name, address, type_name)
 
     def contains_channel(self, name: str, address: int) -> bool:
         for row in range(self.rowCount()):
@@ -767,6 +827,8 @@ class ScopePage(QWidget):
     start_requested = Signal(str, object, int)
     stop_requested = Signal()
     add_symbol_requested = Signal()
+    open_memory_requested = Signal(str, object, str)
+    add_watch_requested = Signal(str, object, str)
     log_requested = Signal(str)
     fps_changed = Signal(int)
 
@@ -937,6 +999,8 @@ class ScopePage(QWidget):
         self.channel_table.selected_channel_changed.connect(self._selected_channel_changed)
         self.channel_table.command_requested.connect(self._table_key_command)
         self.channel_table.color_changed.connect(self._channel_color_changed)
+        self.channel_table.open_memory_requested.connect(self.open_memory_requested.emit)
+        self.channel_table.add_watch_requested.connect(self.add_watch_requested.emit)
         splitter.addWidget(self.channel_table)
         splitter.setStretchFactor(0, 5)
         splitter.setStretchFactor(1, 1)
@@ -1007,30 +1071,44 @@ class ScopePage(QWidget):
         self.add_btn.clicked.connect(self.add_symbol_requested.emit)
         self.remove_btn = QPushButton("删除成员")
         self.remove_btn.clicked.connect(self.channel_table_remove)
-        self.sample_hz_spin = QSpinBox()
-        self.sample_hz_spin.setRange(1, 10000)
-        self.sample_hz_spin.setValue(1000)
-        self.sample_hz_spin.setSuffix(" Hz")
+        self.sample_hz_spin = IntPresetComboBox(
+            [10, 20, 50, 100, 200, 500, 1000, 2000, 5000],
+            value=1000,
+            minimum=1,
+            maximum=10000,
+            suffix="Hz",
+        )
+        self.sample_hz_spin.setToolTip(
+            "Requested HSS sampling presets; type a custom 1..10000 Hz value when needed"
+        )
         self.period_label = QLabel("1.000 ms/sample")
         self.sample_hz_spin.valueChanged.connect(self._update_period_label)
         self.view_combo = QComboBox()
         self.view_combo.addItems(["Overlay", "Stacked"])
         self.view_combo.currentTextChanged.connect(self._view_changed)
-        self.buffer_seconds_spin = QSpinBox()
-        self.buffer_seconds_spin.setRange(1, 120)
-        self.buffer_seconds_spin.setValue(int(self.DEFAULT_BUFFER_SECONDS))
-        self.buffer_seconds_spin.setSuffix(" s")
-        self.buffer_seconds_spin.setToolTip("Scope 内存缓存时间；右键波形可导出当前缓存中的原始采样数据")
+        self.buffer_seconds_spin = IntPresetComboBox(
+            [1, 2, 5, 10, 15, 30, 60, 120],
+            value=int(self.DEFAULT_BUFFER_SECONDS),
+            minimum=1,
+            maximum=120,
+            suffix="s",
+        )
+        self.buffer_seconds_spin.setToolTip(
+            "Scope raw-buffer duration presets; type a custom 1..120 s value when needed"
+        )
         self.buffer_seconds_spin.valueChanged.connect(self._buffer_seconds_changed)
-        self.fps_combo = QComboBox()
-        self.fps_combo.setEditable(True)
-        self.fps_combo.addItems(["15", "30", "45", "60", "75", "90", "100", "120", "144"])
-        self.fps_combo.setCurrentText("60")
-        self.fps_combo.setToolTip("Viewport 目标刷新率 1~144 FPS；单次 PreciseTimer + 绝对 Deadline 调度，每帧只唤醒一次，不改变 HSS/RTT 原始采样")
-        if self.fps_combo.lineEdit() is not None:
-            self.fps_combo.lineEdit().setValidator(QIntValidator(1, self.VIEWPORT_FPS_MAX, self.fps_combo))
-            self.fps_combo.lineEdit().editingFinished.connect(self._fps_changed)
-        self.fps_combo.activated.connect(lambda *_: self._fps_changed())
+        self.fps_combo = IntPresetComboBox(
+            [15, 30, 60, 90, 120, 144],
+            value=60,
+            minimum=1,
+            maximum=self.VIEWPORT_FPS_MAX,
+            suffix="",
+        )
+        self.fps_combo.setToolTip(
+            "Viewport refresh presets; type a custom 1..144 FPS value when needed. "
+            "This does not change HSS/RTT acquisition rate."
+        )
+        self.fps_combo.valueChanged.connect(lambda *_: self._fps_changed())
         self.view_all_btn = QPushButton("查看所有波形")
         self.view_all_btn.clicked.connect(self.view_all)
         self.follow_latest_check = QCheckBox("跟随最新数据")
@@ -1153,19 +1231,10 @@ class ScopePage(QWidget):
         self._rebuild_plots()
 
     def _fps_value(self) -> int:
-        try:
-            value = int(self.fps_combo.currentText().strip())
-        except Exception:
-            value = 60
-        return max(1, min(self.VIEWPORT_FPS_MAX, value))
+        return max(1, min(self.VIEWPORT_FPS_MAX, int(self.fps_combo.value())))
 
-    def _fps_changed(self, _text: str = "") -> None:
+    def _fps_changed(self, _value: int | str = 0) -> None:
         fps = self._fps_value()
-        normalized = str(fps)
-        if self.fps_combo.currentText().strip() != normalized:
-            self.fps_combo.blockSignals(True)
-            self.fps_combo.setCurrentText(normalized)
-            self.fps_combo.blockSignals(False)
         if self._sampling:
             self._restart_presentation_clock(float(fps))
         self.view_fps_label.setText(f"View target: {fps} FPS")
@@ -1419,7 +1488,7 @@ class ScopePage(QWidget):
             self.log_requested.emit(f"Scope: removed {count} channel(s)")
 
     def add_symbol(self, name: str, address: int, type_name: str) -> bool:
-        if self._source != "HSS":
+        if self._source != "HSS" or self._sampling:
             return False
         if self.channel_table.contains_channel(name, address):
             return False
@@ -3109,9 +3178,9 @@ class ScopePage(QWidget):
         except Exception:
             pass
         try:
-            self.fps_combo.setCurrentText(str(max(1, min(self.VIEWPORT_FPS_MAX, int(state.get("fps", 60))))))
+            self.fps_combo.setValue(max(1, min(self.VIEWPORT_FPS_MAX, int(state.get("fps", 60)))))
         except Exception:
-            self.fps_combo.setCurrentText("60")
+            self.fps_combo.setValue(60)
         self._fps_changed()
         view = str(state.get("view", "Overlay"))
         if self.view_combo.findText(view) >= 0:

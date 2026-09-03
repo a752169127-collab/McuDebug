@@ -1,4 +1,85 @@
+# V0.6.16 — AI Documentation Layout
+
+## Changed
+- Historical Release Reports moved from root to `docs/releases/`.
+- Project state moved to `docs/state/`; ADR/architecture references to `docs/architecture/`; Workflow/Checklist/AI helper to `docs/development/`.
+- Added `docs/README.md` and `docs/releases/README.md` indexes.
+- Updated START_HERE / AGENTS / SKILL / manifest and active document links so a fresh AI can navigate subfolders directly.
+- Root now keeps only stable entry documentation rather than one Release Report per version.
+- Window title updated to V0.6.16; no runtime debugging behavior changed.
+
+## Verification
+- compileall PASS; full pytest 136 passed; V0.6.16 targeted documentation-layout regression 5 passed.
+
+---
+
 # CHANGELOG
+
+## V0.6.15 — Cross-Module Symbol Actions
+- Added Memory Symbol `Add to Scope` while retaining `Add to Watch / Copy Symbol`; Raw Memory selections can also be sent to Scope.
+- Added Watch row context actions: `Add to Scope / Open in Memory / Copy Symbol`.
+- Added Scope channel context actions: `Open in Memory / Add to Watch / Copy Symbol`; RTT target-defined channels keep only safe copy behavior because they do not carry AXF addresses.
+- Added `MemoryExplorerPage.open_symbol_location()`: exact name+address matches use semantic Symbol navigation, while manually named rows fall back to raw address navigation without guessing identity.
+- Cross-module actions reuse the existing Watch/Scope/Memory objects and the single `JLinkWorker`; no new probe owner or acquisition path was introduced.
+- Added V0.6.15 static regressions for menu surfaces, MainWindow signal wiring, RTT guard, Memory semantic fallback, and single-worker preservation.
+
+## V0.6.14 — Symbol Navigation Focus
+- Explicit Symbol/member navigation in Symbols View now centers and highlights the resolved typed row once, making the destination visually unambiguous.
+- Refresh preserves only an actually selected row instead of stale `currentIndex()` state, so a cleared selection stays cleared.
+- Clicking empty Symbols viewport space clears both selection and current index; later Auto Refresh does not resurrect it.
+- No changes to J-Link I/O, bounded semantic block reads, AXF/DWARF parsing, or Scope/Watch paths.
+- Added V0.6.14 static regressions for one-shot navigation selection, real-selection refresh semantics and blank-space deselection.
+
+## V0.6.13 — Stable Semantic Refresh
+- Fixed Symbols View auto/manual refresh snapping the vertical viewport back to the original navigation anchor after every block update.
+- Symbol navigation now centers the anchor once; subsequent refresh/model rebuilds preserve vertical/horizontal scroll position.
+- Removed the artificial persistent row selection created by navigation; only user-created selections persist across refresh.
+- Cached semantic refresh no longer rebuilds an unchanged local model. No J-Link read amplification or acquisition-path changes.
+- Added V0.6.13 regression coverage for refresh viewport preservation, one-shot anchor focus and patch-byte view preservation.
+
+## V0.6.12 — Semantic Memory View
+- Added `Memory View: Auto / Raw / Symbols`. Auto keeps numeric-address navigation in the CE-style Raw view and switches Symbol/member navigation to the semantic typed view.
+- Added a bounded `SymbolMemoryView` that lists nearby scalar AXF/DWARF leaves as `Address / Symbol / Type / Value`, so arrays such as `m_BiasAD[0]...[3]` appear as real members instead of only `+00/+02/...` cells.
+- Each Symbol row decodes from its own normalized datatype/size (`uint8/uint16/uint32/float/double/...`) while sharing one raw block read. No per-symbol J-Link reads were introduced.
+- Added `SymbolIndex.scalar_starts_in_range()` with DWARF-first duplicate suppression and `plan_symbol_read_window()` using the existing 2 KiB Memory read ceiling.
+- Symbol rows support double-click typed edit and context actions for Add to Watch / Copy Symbol. Raw Hex/Text editing remains unchanged.
+- Added V0.6.12 regression coverage for array-member ordering, DWARF preference, bounded semantic read planning, mode wiring and shared block-cache fanout.
+
+## V0.6.11 — Engineering Presets
+- Replaced single-step SpinBox UX for Memory Auto Refresh, Watch polling, Scope sampling and Scope buffer with editable engineering preset drop-downs.
+- Presets: Memory `100/200/500/1000/2000/5000 ms`; Watch `10/20/50/100/200/500/1000/2000 ms`; Scope sampling `10/20/50/100/200/500/1000/2000/5000 Hz`; Scope buffer `1/2/5/10/15/30/60/120 s`.
+- Scope FPS now uses the same editable preset control with `15/30/60/90/120/144 FPS`.
+- Custom in-range values remain typeable and persisted; existing integer settings remain compatible.
+- Scope buffer keeps the existing 120 s maximum to preserve the current 1.5M-point raw-ring product bound. No acquisition, J-Link ownership, timing or buffer algorithms were changed.
+
+## V0.6.10 — Compact Connection Panel
+- J-Link Connection configuration can be collapsed/expanded with a persistent `− / +` control.
+- Successful connection auto-collapses the configuration area while leaving the connection summary and `Disconnect` visible; disconnect auto-expands it again. Connected configuration fields remain disabled even if manually expanded.
+- Test Automation hides duplicate Qt vertical row headers; Workflow removes the redundant explicit `#` column and Results keeps only its business `Case` column.
+- No changes to J-Link ownership, acquisition, Memory, Watch write semantics, or Automation execution.
+
+## V0.6.9 — Stable History Controls
+- Added a persistent `Delete History` toolbar button beside the Address/Symbol history control. It removes the selected/current history entry after the combo popup closes, while preserving the current Memory destination.
+- Existing history selection is navigation-only and no longer updates MRU order. Choosing a saved Symbol/address repeatedly leaves the history list in the same order.
+- Newly typed successful queries still use the existing bounded/deduplicated MRU insertion rule.
+- Removed the History popup context-menu wiring as the primary delete path because nested popup menus can disappear when the editable QComboBox closes on Windows/PySide6. Delete-key remains a secondary shortcut.
+- Preserves V0.6.8 Symbol/completer isolation, Symbol-first display, typed navigation, auto-fit, single J-Link owner and no-readback writes.
+
+## V0.6.8 — Memory Symbol/History Reliability
+- Fixed the remaining editable `QComboBox + QCompleter` Enter race: Symbol completion is now committed only by `QCompleter.activated`; the history combo forwards `activated(int)` only when its own MRU popup was actually opened. A Symbol selection can no longer be overwritten by a stale history row such as `__lit__00000000`.
+- Address / Symbol Enter no longer guesses from completer `currentIndex/currentCompletion`; exact Symbol/raw-address text uses a deterministic path, while partial candidate selection is owned by the completer.
+- Added per-item history deletion: right-click a history row and choose `Delete This History`, or highlight it and press Delete. `Clear History` remains the explicit remove-all action.
+- Added `symbol_width_mode` settings migration. Older saved narrow manual widths are migrated to automatic full-visible-Symbol fitting once; new V0.6.8 manual drags can still persist explicitly as manual mode.
+- Preserves Symbol-first editor display, typed Symbol navigation, local AXF filtering, single J-Link owner and no-readback default writes.
+
+## V0.6.7 — Memory Navigation + Reliable Watch Commit
+- Fixed keyboard Symbol completion/history Enter navigation so the explicitly highlighted row is resolved exactly once; stale `QCompleter.currentCompletion()` state is no longer used for hidden-popup fallback.
+- History activation now resolves the selected MRU model row directly instead of round-tripping through the editable combo/completer state.
+- Symbol navigation preserves the full Symbol/member name in the Address / Symbol editor; raw manually-entered numeric addresses remain canonical `0xXXXXXXXX`.
+- Memory Symbol column now auto-fits the longest visible Symbol by default with a cached, local-only width calculation; double-click returns to auto-fit after a manual width override.
+- History and Symbol completion popups auto-fit Symbol/Type/Address columns when their local models are rebuilt, reducing manual header resizing.
+- Watch Set Value commit moved to `QStyledItemDelegate.setModelData()`, making Enter and mouse focus-out share the same authoritative commit path. Explicitly re-entering the same value still produces a hardware write; untouched cells do not, and the dirty guard prevents duplicate writes.
+- Preserves single J-Link owner, no read-back verify default writes, AXF local completion and V0.4.23 Scope performance architecture.
 
 ## V0.6.6 — Symbol Typed Memory Navigation
 - Memory Address/Symbol history popup now shows three columns: History, Type, Address, while preserving the original editable combo width.
@@ -113,7 +194,7 @@
 
 ## Verification
 - User screenshot reproduces header-only/too-short popup: VERIFIED_USER_HARDWARE (symptom)
-- compileall / pytest: see `state/TEST_STATUS.md`
+- compileall / pytest: see `docs/state/TEST_STATUS.md`
 - Qt popup runtime after fix: PENDING_USER_HARDWARE
 
 ---
