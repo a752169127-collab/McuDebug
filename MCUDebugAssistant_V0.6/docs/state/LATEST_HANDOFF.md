@@ -1,44 +1,29 @@
-# LATEST_HANDOFF — V0.6.16
+# LATEST_HANDOFF — V0.6.17
 
 ## What changed
 
-V0.6.16 is an engineering-governance release. Runtime behavior is intentionally unchanged from V0.6.15. Documentation is now grouped under `docs/` so the ZIP root remains readable as release history grows.
+V0.6.17 fixes a destructive Test Automation Manual Input keyboard interaction. Pressing Return/Enter while entering a manual/external measurement now confirms the input (`Confirm / Next`) instead of allowing Qt to activate `Stop Run` as an unintended default button.
 
-## Read order for next AI
+## Implementation
 
-1. `START_HERE_FOR_NEW_AI.md`
-2. `AGENTS.md` / `SKILL.md`
-3. `docs/state/PROJECT_STATE.yaml`
-4. this file
-5. `docs/state/ISSUE_LEDGER.md` / `docs/state/TEST_STATUS.md`
-6. `docs/architecture/ADR.md` / `ARCHITECTURE.md` only as needed
-7. `docs/releases/README.md` then only the relevant historical report
-
-Do not read every historical release by default.
+- `Confirm / Next`: `setDefault(True)` + `setAutoDefault(True)`.
+- `Skip Case`: explicitly non-default/non-auto-default.
+- `Stop Run`: explicitly non-default/non-auto-default and `ClickFocus`; it remains an explicit stop action.
+- No changes to Automation Engine, case generation, polling, single J-Link owner, Results, Watch, Scope or Memory.
 
 ## Automated verification
 
 - compileall: PASS
-- full pytest: 136 passed
-- V0.6.16 targeted documentation-layout regression: 5 passed
+- full pytest: 139 passed
+- V0.6.17 targeted Manual Input regression: 3 passed
 
+## Pending user validation
 
-## Functional baseline preserved
+On Windows/PySide6, run a plan containing `Manual Input`, type a valid value and press Enter. The dialog should confirm and continue to the next workflow step/case. Verify `Stop Run` only stops when explicitly clicked.
 
-- V0.6.15 Memory/Watch/Scope cross-module Symbol actions.
-- V0.6.14 one-shot Symbol navigation selection + blank-space deselect.
-- V0.6.13 refresh preserves Semantic Memory viewport.
-- V0.6.12 typed Semantic Memory from one bounded block read.
-- V0.6.11 engineering preset combo controls.
-- V0.4.23 Scope high-performance architecture and single J-Link owner remain protected.
+## Preserved baselines
 
-## Pending user/hardware validation
-
-- Windows/PySide6 smoke for V0.6.15 context menus and recent Memory UI behavior.
-- Real AXF/J-Link validation for Semantic Memory mixed types/arrays.
-- Long-run Scope Release-mode hardware validation.
-- Test Automation multi-signal stable/sample workflows on hardware.
-
-## Packaging rule
-
-For future releases, create the report under `docs/releases/`, update `docs/releases/README.md`, and keep root entry files stable.
+- V0.6.16 indexed AI documentation layout.
+- V0.6.15 cross-module Symbol actions.
+- V0.6.12–V0.6.14 Semantic Memory behavior.
+- V0.4.23 Scope high-performance path and single J-Link owner.

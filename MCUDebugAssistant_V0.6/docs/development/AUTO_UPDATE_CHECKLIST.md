@@ -28,4 +28,4 @@
 - [ ] 最终答复包含下一步验证步骤
 
 
-> Current baseline: V0.6.16 — AI Documentation Layout.
+> Current baseline: V0.6.17 — Manual Input Enter Confirm.

@@ -195,6 +195,11 @@ debugpy/pydevd 下的 Qt Timer/Event Loop 数据不能直接当 release performa
 
 ## 当前 V0.6.x 技术演进
 
+## V0.6.17 Manual Input Enter Confirm 基线
+- Test Automation 的 Manual Input 对话框中，`Confirm / Next` 是唯一 Enter 默认动作。
+- `Skip Case / Stop Run` 关闭 default/auto-default；Stop 使用 ClickFocus，避免录入数值时 Enter 误停整个 Run。
+- 这是纯 Qt 输入语义修复，不改变 Test Engine、Polling、J-Link owner 或结果累积。
+
 ## V0.6.15 Cross-Module Symbol Actions 基线
 - Memory Symbols：`Add to Watch / Add to Scope / Copy Symbol`；Raw Memory 选中地址也可 Add to Scope。
 - Watch Variable：`Add to Scope / Open in Memory / Copy Symbol`。

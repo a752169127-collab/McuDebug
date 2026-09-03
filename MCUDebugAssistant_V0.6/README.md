@@ -1,6 +1,14 @@
-# MCU Debug Assistant V0.6.16 — AI Documentation Layout
+# MCU Debug Assistant V0.6.17 — Manual Input Enter Confirm
 
 V0.6.x 在 V0.5.5 的 **Watch + Scope + Symbol-aware Memory Explorer** 基础上新增第一版无代码 **Test Automation Studio**。目标不是让用户写 Python/YAML，而是通过参数矩阵和可配置 Workflow，把 MCU 运行时变量读写、稳态判断、统计、人工测量和结果导出编排成自动测试用例。
+
+
+## V0.6.17 重点
+
+- 修复 Test Automation `Manual Input` 对话框中按 Enter 可能触发 `Stop Run`、直接停止整批用例的问题。
+- `Confirm / Next` 现在是对话框唯一默认 Enter 动作：输入人工/外部仪器测量值后按 Enter 即确认并继续。
+- `Skip Case` 与 `Stop Run` 明确关闭 Qt auto-default；`Stop Run` 采用 ClickFocus，避免数据输入时因为按钮焦点/默认按钮规则被 Enter 误触发。
+- 不改变 Automation Engine、Parameter Matrix、Polling、J-Link single-owner 或结果模型。
 
 
 ## V0.6.16 重点
@@ -159,7 +167,7 @@ run.bat
 - Real AXF + J-Link Automation run: `PENDING_HARDWARE`
 - External instrument automatic acquisition: **not implemented in V0.6.9**，当前使用 `MANUAL INPUT`。
 
-详细状态见 `docs/state/TEST_STATUS.md`、`docs/state/LATEST_HANDOFF.md`、`docs/releases/RELEASE_REPORT_V0.6.16.md`。
+详细状态见 `docs/state/TEST_STATUS.md`、`docs/state/LATEST_HANDOFF.md`、`docs/releases/RELEASE_REPORT_V0.6.17.md`。
 
 
 

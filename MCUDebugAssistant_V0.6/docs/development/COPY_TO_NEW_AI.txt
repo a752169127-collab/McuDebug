@@ -1,4 +1,4 @@
-Current baseline: V0.6.16 — AI Documentation Layout.
+Current baseline: V0.6.17 — Manual Input Enter Confirm.
 请接手 MCU Debug Assistant 项目。
 
 先读取：

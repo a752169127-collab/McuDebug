@@ -557,6 +557,20 @@ class ManualInputDialog(QDialog):
         confirm = QPushButton("Confirm / Next")
         skip = QPushButton("Skip Case")
         stop = QPushButton("Stop Run")
+
+        # V0.6.17: Manual Input is a data-entry dialog, so Return/Enter must
+        # confirm the entered measurement instead of inheriting whichever
+        # action button Qt happens to treat as the dialog default.  Stop is
+        # intentionally an explicit click action and must never become the
+        # auto-default button when an editor owns keyboard focus.
+        confirm.setDefault(True)
+        confirm.setAutoDefault(True)
+        skip.setDefault(False)
+        skip.setAutoDefault(False)
+        stop.setDefault(False)
+        stop.setAutoDefault(False)
+        stop.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
+
         confirm.clicked.connect(self._confirm)
         skip.clicked.connect(self._skip)
         stop.clicked.connect(self._stop)

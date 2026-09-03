@@ -1,3 +1,16 @@
+# V0.6.17 — Manual Input Enter Confirm
+
+## Fixed
+- Test Automation `Manual Input` no longer lets Return/Enter activate `Stop Run` through Qt dialog default-button behavior.
+- `Confirm / Next` is now the explicit default/auto-default action; valid entered values are confirmed and execution continues.
+- `Skip Case` and `Stop Run` are non-default actions; Stop uses click focus so normal data-entry keyboard focus cannot turn it into an implicit Enter action.
+- No changes to J-Link I/O, Automation polling, result schema, Scope, Watch or Memory.
+
+## Verification
+- compileall PASS; full pytest 139 passed; V0.6.17 targeted regression 3 passed.
+
+---
+
 # V0.6.16 — AI Documentation Layout
 
 ## Changed

@@ -1,5 +1,17 @@
 # ISSUE_LEDGER
 
+## FIX-AUTOMATION-MANUAL-ENTER-V0617
+- Version: V0.6.17
+- Status: CODE_COMPLETE / VERIFIED_AUTOMATED / PENDING_USER_QT_SMOKE
+- Severity: high UX / destructive interaction
+- Symptom: while entering a Manual Input value, pressing Enter could activate `Stop Run` and terminate the whole generated-case run.
+- Root cause: custom QDialog action buttons had no explicit default policy; Qt could resolve Enter to an unintended auto-default QPushButton. Stop was the first action button in the row and was therefore unsafe as an implicit keyboard target.
+- Fix: make `Confirm / Next` default + auto-default; make `Skip Case` and `Stop Run` non-default/non-auto-default; Stop uses ClickFocus so normal editor keyboard focus cannot promote it.
+- Runtime impact: UI-only; no change to Automation polling/J-Link/result flow.
+- Automated evidence: targeted static regression 3 passed; full pytest 139 passed; compileall PASS.
+- Hardware/Qt: actual Windows/PySide6 key interaction remains PENDING_USER_QT_SMOKE.
+
+
 # GOV-AI-DOC-LAYOUT-V0616
 - Version: V0.6.16
 - Status: CODE_COMPLETE / VERIFIED_AUTOMATED

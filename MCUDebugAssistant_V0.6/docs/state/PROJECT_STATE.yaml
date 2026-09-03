@@ -1,8 +1,9 @@
 project: MCU Debug Assistant
 state_schema: 1
-current_version: V0.6.16
+current_version: V0.6.17
 version_status: "VERIFIED_AUTOMATED / PENDING_QT_SMOKE / PENDING_HARDWARE"
 main_branch_focus:
+  - "validate V0.6.17 Manual Input Enter=Confirm and explicit Stop behavior on Windows/PySide6"
   - "validate V0.6.15 Memory/Watch/Scope context actions on Windows/PySide6 and real AXF/J-Link"
   - "keep V0.6.16 documentation paths/index valid so a fresh AI can navigate without reading all historical releases"
   - "validate V0.6.12 Auto/Raw/Symbols semantic Memory view with real AXF/J-Link; verify array members and mixed scalar types"
@@ -16,6 +17,7 @@ main_branch_focus:
   - "continue V0.4.23 Scope RUN-mode hardware validation without reopening old diagnostics"
 
 validated:
+  - "V0.6.17 Manual Input Enter default-button static regression: 3 targeted / 139 full tests"
   - "V0.6.16 documentation hierarchy/root-cleanliness/path-manifest regression: 5 targeted / 136 full tests"
   - "V0.6.15 cross-module Symbol action routing static regression: 5 targeted / 131 full tests"
   - "V0.6.14 Symbol navigation one-shot select + blank-space deselect static regression"
@@ -51,6 +53,9 @@ validated:
   - "V0.6.0 Test Automation UI/MainWindow/JLinkWorker static architecture regression"
 
 open_issues:
+  - id: FIX-AUTOMATION-MANUAL-ENTER-V0617
+    status: CODE_COMPLETE / VERIFIED_AUTOMATED / PENDING_USER_QT_SMOKE
+    severity: high
   - id: GOV-AI-DOC-LAYOUT-V0616
     status: CODE_COMPLETE / VERIFIED_AUTOMATED
     severity: low
@@ -125,9 +130,9 @@ open_issues:
     severity: medium
 
 latest_context:
-  automated_environment: "Python available; compileall PASS; pytest 136 passed; V0.6.16 targeted 5 passed"
+  automated_environment: "Python available; compileall PASS; pytest 139 passed; V0.6.17 targeted 3 passed"
   qt_smoke: "PENDING_ENVIRONMENT: PySide6 unavailable in current execution environment"
   hardware: "PENDING_HARDWARE: real AXF/J-Link Test Automation execution not run here"
   external_instruments: "V0.6.3 uses MANUAL INPUT; PF300/VT650 automatic adapters are future work"
   debugger: none
-  note: "V0.6.16 reorganizes AI/development documentation without changing runtime target-access behavior; V0.6.15 cross-module Symbol routing remains the functional baseline."
+  note: "V0.6.17 fixes Manual Input keyboard/default-button routing only; V0.6.16 documentation layout and V0.6.15 cross-module Symbol routing remain preserved."

@@ -2,7 +2,7 @@
 
 ## Current
 
-- **V0.6.16 — AI Documentation Layout**：工程文档分层归档；根目录稳定入口；AI 按状态/交接/索引按需读取历史。
+- **V0.6.17 — Manual Input Enter Confirm**：Automation 人工输入按 Enter 默认确认；Stop Run 不再成为隐式默认按钮。
 
 ## Memory / Symbol / Cross-module
 
@@ -25,6 +25,7 @@
 
 ## Test Automation
 
+- V0.6.17 — Manual Input Enter Confirm
 - V0.6.3 — Persistent Results + Excel Clipboard
 - V0.6.2 — Clean Automation Results
 - V0.6.1 — Workflow Simplification + Step Dialog Layout Fix

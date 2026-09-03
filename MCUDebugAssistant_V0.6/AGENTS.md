@@ -151,6 +151,12 @@ Display 才使用：
 - Raw Memory 仍是 Buffer、padding、未知内存、协议数据和底层布局的权威视图，不能被 Semantic view 删除或弱化。
 - Symbol view 的列宽/排序/值格式属于 Presentation；不得导致 AXF 重解析或额外 Probe I/O。
 
+### V0.6.17 Manual Input 键盘语义基线
+- `Manual Input` 是数据录入对话框：Return/Enter 的默认语义必须是 `Confirm / Next`，不能触发 `Stop Run`。
+- `Confirm / Next` 必须是唯一 default/auto-default 按钮；`Skip Case` / `Stop Run` 不得成为 Qt auto-default。
+- `Stop Run` 必须保持显式用户动作，不能因为 QDialog 默认按钮、编辑器 focus 或 Enter 键隐式终止整个 Test Run。
+- 该 UX 修复只属于 Automation Presentation/Input 层，不得改变 single J-Link owner、polling execution 或 Result schema。
+
 ### Test Automation Studio
 - Test Automation 是 Watch/Scope/Memory 之上的编排层，不得拥有独立 J-Link Session，也不得从 GUI 直接调用 DLL。
 - V0.6.0 自动化读写必须经过唯一 `JLinkWorker`；测试 Run 开始时停止连续 Watch/Scope sampling，使用 request/response polling 保证执行语义确定。

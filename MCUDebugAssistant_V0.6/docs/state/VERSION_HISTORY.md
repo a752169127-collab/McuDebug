@@ -1,5 +1,6 @@
 # VERSION_HISTORY
 
+- V0.6.17 — Manual Input Enter Confirm: makes Confirm/Next the Manual Input dialog default Enter action and prevents Stop Run from becoming an implicit Qt auto-default action.
 - V0.6.16 — AI Documentation Layout: moves historical release/state/architecture/development docs into indexed `docs/` subfolders while keeping stable root AI entrypoints; no runtime behavior change.
 - V0.6.15 — Cross-Module Symbol Actions: Memory/Watch/Scope context actions route shared Symbols directly between views with exact semantic Memory matching, RTT guards, and no new J-Link owner.
 - V0.6.14 — Symbol Navigation Focus: Symbol navigation centers + selects the resolved member once; empty-space click clears selection, and refresh respects the cleared state.

@@ -62,4 +62,4 @@
 达到 Gate 后 **STOP**，不要继续无目标优化。
 
 
-> Current baseline: V0.6.16 — AI Documentation Layout.
+> Current baseline: V0.6.17 — Manual Input Enter Confirm.

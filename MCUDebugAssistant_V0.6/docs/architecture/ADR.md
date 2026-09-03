@@ -171,3 +171,12 @@ Reason: the user needs a clear "where did my Symbol resolve?" cue without return
 **Why:** a flat release-report history makes the ZIP noisy and encourages new AI sessions to read stale history indiscriminately. Indexed subtrees preserve every artifact while making current state/handoff the default context.
 
 **Constraint:** moving documentation must not modify runtime architecture or create hidden dependencies on an AI-specific filesystem. All references are repository-relative and `manifest.json` points to the canonical entry/state/index files.
+
+## ADR — V0.6.17 Manual Input Enter confirms; Stop remains explicit
+
+**Decision:** in `ManualInputDialog`, `Confirm / Next` is the only default/auto-default button. `Skip Case` and `Stop Run` are explicitly non-default; Stop uses click focus.
+
+**Why:** Qt dialogs may activate a default/auto-default `QPushButton` when Return/Enter is pressed from a `QLineEdit`. In a test workflow, Enter is a natural data-entry confirmation gesture; allowing it to resolve to `Stop Run` is destructive and can terminate an entire parameter sweep accidentally.
+
+**Constraint:** this is a UI input-routing decision only. It must not change Automation execution state, J-Link ownership, polling cadence, case/result semantics, or hardware I/O.
+

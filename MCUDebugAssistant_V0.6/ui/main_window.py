@@ -70,7 +70,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("MCU Debug Assistant V0.6.16 - AI Documentation Layout")
+        self.setWindowTitle("MCU Debug Assistant V0.6.17 - Manual Input Enter Confirm")
         self.resize(1220, 820)
         # Keep the window genuinely user-resizable. Scope controls are wrapped
         # into two rows in V0.3.13 so this smaller minimum width is practical.

@@ -33,7 +33,9 @@ def test_documentation_subtrees_and_indexes_exist():
 
 def test_manifest_points_to_existing_canonical_docs():
     manifest = json.loads((ROOT / "manifest.json").read_text(encoding="utf-8"))
-    assert manifest["current_context_version"] == "V0.6.16"
+    current = manifest["current_context_version"]
+    assert current.startswith("V0.6.")
+    assert (ROOT / "docs" / "releases" / f"RELEASE_REPORT_{current}.md").is_file()
     for key in ["entrypoint", "agent_process", "project_skill", "workflow", "docs_index", "current_state", "latest_handoff", "release_index"]:
         assert (ROOT / manifest[key]).is_file(), (key, manifest[key])
 
@@ -49,6 +51,7 @@ def test_active_entry_docs_use_new_paths_and_do_not_request_full_release_history
     assert "docs/releases/README.md" in agents
 
 
-def test_ui_version_title_is_v0616_without_runtime_feature_change_marker():
+def test_ui_title_tracks_manifest_current_version():
+    manifest = json.loads((ROOT / "manifest.json").read_text(encoding="utf-8"))
     text = (ROOT / "ui/main_window.py").read_text(encoding="utf-8")
-    assert "MCU Debug Assistant V0.6.16 - AI Documentation Layout" in text
+    assert f"MCU Debug Assistant {manifest['current_context_version']}" in text

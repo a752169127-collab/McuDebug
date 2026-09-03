@@ -4,7 +4,7 @@
   "agent_process": "AGENTS.md",
   "project_skill": "SKILL.md",
   "workflow": "docs/development/WORKFLOW.md",
-  "current_context_version": "V0.6.16",
+  "current_context_version": "V0.6.17",
   "purpose": "closed-loop AI secondary development for MCU runtime debugging, observability, memory exploration, and no-code test automation",
   "docs_index": "docs/README.md",
   "current_state": "docs/state/PROJECT_STATE.yaml",
